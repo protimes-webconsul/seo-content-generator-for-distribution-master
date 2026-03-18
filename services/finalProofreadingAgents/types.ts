@@ -34,13 +34,14 @@ export interface Suggestion {
   priority: 'high' | 'medium' | 'low';
 }
 
-export type AgentType = 
+export type AgentType =
   | 'proper-nouns'        // 固有名詞校閲
   | 'numbers-stats'       // 数値・統計確認
   | 'dates-timeline'      // 日付・時系列検証
   | 'facts-cases'         // 事例・ファクト検証
   | 'company'            // 自社サービス専門
   | 'citations'          // 引用・出典検証
+  | 'citation-verification' // 出典正確性検証（MoA）
   | 'technical'          // 技術仕様確認
   | 'legal'              // 法令・規制チェック
   | 'integration';       // 最終統合

@@ -11,10 +11,12 @@
     "start": "concurrently \"npm run dev\" \"npm run server\""
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.78.0",
     "@google/generative-ai": "^0.21.0",
     "@supabase/supabase-js": "^2.86.2",
     "@tailwindcss/typography": "^0.5.16",
     "@types/kuromoji": "^0.1.3",
+    "docx": "^9.6.1",
     "dotenv": "^17.2.1",
     "googleapis": "^159.0.0",
     "js-yaml": "^4.1.0",
