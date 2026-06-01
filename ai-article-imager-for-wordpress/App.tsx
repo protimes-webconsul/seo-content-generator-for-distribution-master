@@ -69,7 +69,7 @@ const App: React.FC<AppProps> = ({ initialArticleData }) => {
     const fetchWpConfig = async () => {
       try {
         const apiUrl =
-          import.meta.env.VITE_API_URL || "http://localhost:3001/api";
+          import.meta.env.VITE_API_URL || "http://localhost:3010/api";
         const apiKey = import.meta.env.VITE_INTERNAL_API_KEY || "";
         const response = await fetch(`${apiUrl}/wordpress/config`, {
           headers: {
@@ -165,6 +165,18 @@ const App: React.FC<AppProps> = ({ initialArticleData }) => {
     articleHtml.trim() !== "" &&
     (baseImages.length > 0 || useDefaultImages);
   const tooManyImages = baseImages.length > 10;
+
+  // 起動時に親ウィンドウ（メインアプリ）へ準備完了シグナルを送信
+  useEffect(() => {
+    if (window.opener) {
+      console.log("📢 IMAGER_READY を親ウィンドウに送信");
+      try {
+        window.opener.postMessage({ type: "IMAGER_READY" }, "*");
+      } catch (e) {
+        console.warn("⚠️ IMAGER_READY 送信失敗:", e);
+      }
+    }
+  }, []);
 
   // postMessageリスナーを設定（メインアプリからのデータ受信用）
   useEffect(() => {

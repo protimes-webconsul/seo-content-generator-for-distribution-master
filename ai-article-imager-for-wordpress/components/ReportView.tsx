@@ -381,7 +381,7 @@ export const ReportView: React.FC<ReportViewProps> = ({
             console.log(`  - G列（メタディスクリプション）: "${articleMetaDescription.substring(0, 50)}..."`);
           }
           const apiUrl =
-            import.meta.env.VITE_API_URL || "http://localhost:3001/api";
+            import.meta.env.VITE_API_URL || "http://localhost:3010/api";
           const response = await fetch(`${apiUrl}/spreadsheet-mode/update`, {
             method: "POST",
             headers: {

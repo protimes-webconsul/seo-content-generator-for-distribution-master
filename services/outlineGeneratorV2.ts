@@ -1,7 +1,7 @@
 // 構成案生成サービス Ver.2
 // SEO構成ワークフローに基づいた新しい構成案生成
 
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenAI } from "@google/genai";
 import type { 
   SeoOutlineV2, 
   CompetitorResearchResult, 
@@ -17,12 +17,14 @@ import { generateTitleHook, generateFullTitle } from '../utils/titleHookGenerato
 // import { getCompanyInfo, generateCompanyContext } from './companyService';
 // import { curriculumDataService } from './curriculumDataService';
 import { getContextForKeywords, isSupabaseAvailable } from './primaryDataService';
+import type { ClientProfile } from '../types';
+import { buildClientPromptContext } from './clientDataService';
 
 const apiKey = import.meta.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
 if (!apiKey) {
     throw new Error("GEMINI_API_KEY not set.");
 }
-const genAI = new GoogleGenerativeAI(apiKey);
+const genAI = new GoogleGenAI({ apiKey });
 
 /**
  * キーワードをスマート分割
@@ -89,8 +91,8 @@ function detectCompetitorFAQ(articles: ArticleAnalysis[]): {
   const faqCount = articlesWithFAQ.length;
   const faqPercentage = (faqCount / articles.length) * 100;
   
-  // 30%以上の記事がFAQを含む場合、FAQありと判定
-  const hasFAQ = faqPercentage >= 30;
+  // 60%以上の記事がFAQを含む場合のみFAQありと判定（優先度：弱）
+  const hasFAQ = faqPercentage >= 60;
   
   console.log(`📊 FAQ分析: ${faqCount}/${articles.length}記事 (${faqPercentage.toFixed(0)}%) がFAQを含む`);
   console.log(`   判定: ${hasFAQ ? 'FAQ必要' : 'FAQ不要'}`);
@@ -326,16 +328,26 @@ function determineH2Order(topArticles: ArticleAnalysis[]): string[] {
   return bestPattern.split(' → ').filter(h2 => h2.length > 0);
 }
 
-// -10%ルールに基づいてH2/H3数を調整
-function applyMinusTenPercentRule(
-  averageH2Count: number, 
-  averageH3Count: number
-): { minH2Count: number; minH3Count: number } {
-  // -10%の下限を計算（切り上げ）
-  const minH2Count = Math.ceil(averageH2Count * 0.9);
-  const minH3Count = Math.ceil(averageH3Count * 0.9);
-  
-  return { minH2Count, minH3Count };
+// 目標文字数5,000〜6,000字からH2・H3数を逆算（-10%ルール廃止）
+function calculateH2H3FromCharCount(): {
+  minH2Count: number;
+  maxH2Count: number;
+  idealH2Count: number;
+  maxH3Total: number;
+} {
+  // リード(275字) + まとめ(350字) = 625字の固定費
+  // 本文余白: 5,000 - 625 = 4,375字（最小）/ 6,000 - 625 = 5,375字（最大）
+  // H2 1本あたり700〜900字として逆算
+  //   最小: 4,375 ÷ 900 ≈ 4.9 → 5本
+  //   最大: 5,375 ÷ 700 ≈ 7.7 → 7本
+  // H3は1本あたり平均250字として、H2 6本 × 700字 = 4,200字使用後の残余で計算
+  // 上限12個に設定（250字 × 12 = 3,000字、H2本文との合計で6,000字以内に収める）
+  return {
+    minH2Count: 5,    // 最低5本（まとめ・自社訴求含む）
+    maxH2Count: 7,    // 最大7本（文字数上限から厳守）
+    idealH2Count: 6,  // 理想6本
+    maxH3Total: 12    // H3合計の上限（文字数オーバー防止）
+  };
 }
 
 // H3の「0 or 2以上」ルールを適用
@@ -402,7 +414,8 @@ export async function generateOutlineV2(
   competitorResearch: CompetitorResearchResult,
   includeImages: boolean = true,
   generateTwoIntroductions: boolean = true, // 導入文を2パターン生成するか
-  referenceMaterialContext?: string // 参考資料テキスト（任意）
+  referenceMaterialContext?: string, // 参考資料テキスト（任意）
+  clientProfile?: ClientProfile // 取引先プロフィール（任意）
 ): Promise<SeoOutlineV2> {
   const searchIntent = classifySearchIntent(keyword);
   const validArticles = competitorResearch.validArticles;
@@ -420,8 +433,8 @@ export async function generateOutlineV2(
     adjustedH3Count
   } = calculateAveragesExcludingNoise(top15Articles, keyword);
   
-  // -10%ルールの適用（調整後の値に対して適用）
-  const { minH2Count, minH3Count } = applyMinusTenPercentRule(adjustedH2Count, adjustedH3Count);
+  // 文字数5,000〜6,000字から逆算してH2・H3数を決定（最強優先）
+  const { minH2Count, maxH2Count, idealH2Count, maxH3Total } = calculateH2H3FromCharCount();
   
   // H2順序の決定（上位3記事の多数派）
   const top3Articles = validArticles.slice(0, 3);
@@ -464,14 +477,67 @@ export async function generateOutlineV2(
     }
   }
 
+  // 競合URLリスト（執筆メモの根拠URL参照用）
+  const competitorUrlList = validArticles.slice(0, 5).map((article, idx) => {
+    const url = article.url || '';
+    const title = article.title || '';
+    return url ? `${idx + 1}位: ${title} (${url})` : `${idx + 1}位: ${title}`;
+  }).filter(Boolean).join('\n');
+
   const prompt = `
 あなたはSEOに精通したコンテンツプランナーです。
 現在は${currentYear}年${currentMonth}月です。必ず最新の${currentYear}年の情報を基に構成を作成してください。
 以下の要件に従って、「${keyword}」の記事構成案を作成してください。
 
-【⚠️ 最重要：絶対禁止事項 ⚠️】
+【記事設計の前提思想】
+構成を作る前に、以下の3軸で検索意図を整理してください。これが構成の「なぜ」を決めます。
+
+① 解決したい問題（Problem）
+  - このキーワードで検索する人が抱えている具体的な困りごとは何か？
+  - 例：「外壁塗装 費用」→「想定より高額な見積りを提示されて判断できない」
+
+② 知りたい情報（Information）
+  - 上記の問題を解決するために、読者が必要とする情報は何か？
+  - 例：「外壁塗装 費用」→「相場価格・費用の内訳・業者の選び方」
+
+③ なりたい状態（Desired Outcome）
+  - 記事を読み終えた後、読者にどういう状態になってほしいか？
+  - 例：「外壁塗装 費用」→「適正価格を自分で判断でき、業者選びに自信を持てる」
+
+この3軸の答えを土台に、「読者の課題解決ストーリー」として構成を設計してください。
+単なる情報の羅列ではなく、「問題認識→原因理解→解決策習得→実行準備完了」という
+読者の状態変化が自然に起きる流れを設計することが目的です。
+
+【⚠️ 最重要：データ外の数値・事実を作ることを禁止 ⚠️】
+以下のいずれにも含まれない具体的な数値・事例・固有名詞は、執筆メモに絶対に記載しないこと。
+捏造してよい情報は存在しません。不確かな情報は「要確認」と明記するか、記載を省いてください。
+
+使用可能なデータ源：
+  1. 【競合分析データ】に含まれる統計・平均値
+  2. 【補足：一次情報データベース】に含まれる情報（ある場合）
+  3. 【自社独自情報（E-E-A-T強化用）】に含まれる情報（ある場合）
+  4. 取引先プロフィール情報（ある場合）
+  5. 競合記事の見出し構造から読み取れる一般的な論点（数値は使用不可）
+
+⚠️ 特に注意：以下は捏造率が高いので執筆メモに含めないこと
+  - 「市場規模○兆円」「普及率○%」「○社が導入」などの統計数値（提供データにない場合）
+  - 「○年に制定」「○年から普及」などの歴史的事実（提供データにない場合）
+  - 特定の企業名・製品名・事例（提供データにない場合）
+
+【⚠️ SEO構造の絶対禁止事項 ⚠️】
 制約条件:
-  H2への番号付け禁止:
+  他社・競合業者の紹介コンテンツ禁止:
+    - 他社・競合他社・競合サービスの名前を見出しや本文に列挙しない
+    - 「おすすめ○選」「○社比較」型のH2を作る場合は、他社名ではなく「選び方の観点」「チェックポイント」「手法・アプローチ」をH3に列挙すること
+    ❌悪い例:
+      H2: "おすすめ外壁塗装業者12選"
+      H3: ["1. ○○塗装", "2. △△工業", "3. □□リフォーム"]
+    ✅良い例:
+      H2: "外壁塗装業者を選ぶ12のポイント"
+      H3: ["1. 地元密着かどうか", "2. 施工実績の件数", "3. アフターフォローの内容"]
+    理由: "自社サービス訴求を最後に行うため、競合他社を記事内で紹介することは目的に反する"
+
+  H2への番号付け禁止（以下のルール）:
     - H2に順序番号（1. 2. 3.）を付けない
     - 例外: 「○選」「○つのポイント」型のH2のみ番号OK
     ❌悪い例: "1. 生成AIとは？" "2. 導入方法"
@@ -537,12 +603,17 @@ export async function generateOutlineV2(
 - 上位10記事の平均H3数（ノイズ除外後）: ${averageH3Count}
 - 調整後のH2数: ${adjustedH2Count}
 - 調整後のH3数: ${adjustedH3Count}
-- 最小H2数（-10%ルール）: ${minH2Count}
-- 最小H3数（-10%ルール）: ${minH3Count}
-- FAQ判定: ${faqDetection.hasFAQ ? `必要（${faqDetection.faqPercentage.toFixed(0)}%の記事が含む）` : '不要'}
+- H2数（文字数逆算）: 最小${minH2Count}本・最大${maxH2Count}本・理想${idealH2Count}本
+- H3総数上限（文字数逆算）: ${maxH3Total}個
+- FAQ判定: ${faqDetection.hasFAQ ? `推奨（${faqDetection.faqPercentage.toFixed(0)}%の記事が含む）` : '不要（競合での採用率が低い）'}
 - 上位3記事のH2順序パターン: ${h2Order.join(' → ')}
 - 頻出キーワード: ${mustIncludeWords.join(', ')}
 - 除外されたノイズ記事数: ${excludedArticles.length}
+
+【競合記事URL（執筆時の参照先）】
+執筆者が内容を深堀りする際に参照できる競合記事です。
+執筆メモに「参照：○位記事」と記載して、ライターへのヒントにしてください。
+${competitorUrlList}
 
 【重要：上位10記事の実際の見出し構造】
 ${validArticles.slice(0, 10).map((article, idx) => `
@@ -559,41 +630,29 @@ ${article.headingStructure.h2Items.map((h2, h2Idx) => {
 【分析のポイント】
 ${(() => {
   // 「おすすめ○選」パターンの検出（上位10記事から）
-  const recommendPatterns = validArticles.slice(0, 10).flatMap(article => 
-    article.headingStructure.h2Items.filter(h2 => 
+  const recommendPatterns = validArticles.slice(0, 10).flatMap(article =>
+    article.headingStructure.h2Items.filter(h2 =>
       h2.text.match(/おすすめ|選|比較|ランキング|厳選/)
     )
   );
-  
+
   if (recommendPatterns.length > 0) {
     const numbers = recommendPatterns.map(h2 => {
       const match = h2.text.match(/(\d+)[選個社つ]/);
       return match ? parseInt(match[1]) : null;
     }).filter(n => n !== null);
-    
-    const avgNumber = numbers.length > 0 
+
+    const avgNumber = numbers.length > 0
       ? Math.round(numbers.reduce((a, b) => a + b, 0) / numbers.length)
-      : 15;
-    
-    // 実際に使われているサービス名を抽出
-    const serviceNames = recommendPatterns.flatMap(h2 => 
-      h2.h3Items ? h2.h3Items.map(h3 => {
-        // 番号や記号を除去してサービス名を抽出
-        const cleanName = h3.replace(/^[\d①-⑳【】\.\s]+/, '').replace(/[【】].*$/, '').trim();
-        return cleanName;
-      }).filter(name => name.length > 0) : []
-    );
-    
-    const uniqueServices = [...new Set(serviceNames)].slice(0, 20);
-    
-    return `- 競合は「おすすめ${avgNumber}選」のような具体的なサービス紹介を含んでいます
-- このようなH2では、各H3に具体的なサービス名・企業名を列挙してください
-- 競合が実際に紹介しているサービス例: ${uniqueServices.slice(0, 10).join('、')}${uniqueServices.length > 10 ? ` 他${uniqueServices.length - 10}社` : ''}
-- 必ず番号付きで${avgNumber}個前後の具体的なサービス名を記載してください
-- 例：「1. インソース」「2. トレノケート」「3. リクルートマネジメントソリューションズ」など`;
+      : 10;
+
+    return `- 競合は「おすすめ${avgNumber}選」のような形式を使っていますが、他社・他業者名の列挙は禁止です
+- 代わりに「選び方の${avgNumber}のポイント」「失敗しない${avgNumber}の確認項目」のように、観点・チェックポイント・手法をH3に列挙してください
+- H3には選定基準・チェック観点・比較軸など、読者が自分で判断できる情報を入れること
+- 絶対禁止：競合他社名・他業者名・他サービス名の列挙`;
   }
-  
-  return '- 競合の見出し構造を参考に、同様の情報量を確保してください';
+
+  return '- 競合の見出し構造を参考に、読者の課題解決に直結するトピック構成にしてください';
 })()}
 
 【タイトルフックの指示】
@@ -620,6 +679,15 @@ ${primaryDataContext}
 - 使用する場合は、H2やH3の執筆メモに「一次情報より」と明記
 ` : ''}
 
+${clientProfile ? `
+${buildClientPromptContext(clientProfile)}
+
+※上記の取引先執筆ルールは構成案にも反映してください。
+- 表記統一ルールは見出し・執筆メモに適用
+- 会社名ルールは自社訴求セクションの見出し・メモに反映
+- 独自情報は構成案の執筆メモへ積極的に組み込む
+` : ''}
+
 ${referenceMaterialContext ? `
 【自社独自情報（E-E-A-T強化用）】
 以下は自社の参考資料をAIで分析し、記事テーマとの関連情報を構造化したものです。
@@ -635,6 +703,8 @@ ${referenceMaterialContext}
 5. 「記事への活用提案」の内容を参考に、自然な構成を設計
 6. 検索意図を最優先とし、文脈に合わない情報は無理に使用しない
 7. 執筆メモに反映する際は「自社資料より」と出典を明記
+8. 近隣のオススメ業者の紹介をしない
+9. 締めは自社サービスへの相談やお問い合わせにて締めくくる
 ` : ''}
 
 【要件】
@@ -702,21 +772,33 @@ ${referenceMaterialContext}
       target: 125
     必須: ["キーワード含有"]
     
+  【⚠️ 文字数目標：最重要】
+  記事全体の目標文字数: 5,000〜6,000字（HTMLタグ除く本文のみ）
+  - リード文: 200〜350字
+  - H2セクション1つあたり平均: 700〜900字（H3なし）
+  - H3セクション1つあたり平均: 200〜350字
+  - まとめ: 300〜400字
+  - この目標を達成するため、H2・H3の数を調整して過剰にならないようにすること
+  - 5,000字を下回らず、6,000字を超えないよう見出し数を設計すること
+  - H2の「文字数目標」の合計が5,000〜6,000字の範囲に収まるよう各セクションに配分すること
+
   H2数:
     min: ${minH2Count}
-    max: ${Math.floor(adjustedH2Count * 1.1)}
-    ideal: ${adjustedH2Count}
+    max: ${maxH2Count}
+    ideal: ${idealH2Count}
+    根拠: "5,000〜6,000字逆算ルール（競合平均${averageH2Count}本は参考値のみ）"
     特殊ルール: "まとめH2は必須、H3は0個"
+    重要: "文字数5,000〜6,000字を最優先。H2を増やすと文字数が増えるため、max${maxH2Count}本を厳守すること"
 
   H3総数:
-    min: ${minH3Count}（競合平均の90%以上を確保）
-    上限: なし（最小数を満たせば自由に設定可能）
+    上限: ${maxH3Total}個（文字数5,000〜6,000字厳守のための絶対上限）
+    競合H3数（${averageH3Count}個）は参考値のみ。文字数を最優先にH3数を調整すること
     配分ルール:
       - "各H2: 0個 or 2個以上（1個禁止）"
-      - "重要H2: 多めに配分"
-      - "標準H2: 適度に配分"
+      - "重要H2: 2〜3個"
+      - "標準H2: 0個または2個"
       - "まとめH2: 必ず0個（絶対厳守）"
-    重要: "まとめは例外なくH3を0個にすること。他のH2でH3数を調整する。"
+    重要: "H3が増えると文字数が増えるため、合計${maxH3Total}個以内に収めること。まとめは例外なくH3を0個にすること。"
 その他のルール:
   見出しの重複禁止:
     - "同じ意図の見出しを別のH2/H3で繰り返さない"
@@ -728,9 +810,10 @@ ${referenceMaterialContext}
     方針: "自然に置き換え可能な場合のみH2に含める"
     優先度: "SEO効果と自然さのバランス重視"
 
-  執筆メモ:
-    H2: "最大200字"
-    H3: "200-300字目安"
+  執筆メモ（最重要ルール）:
+    H2の執筆メモ: "最大200字。そのH2が記事全体の『課題解決ストーリー』のどの段階に対応するかを1文で明示すること（例：「読者が自社の外壁状態を自己診断できるようになる段階」）"
+    H3の執筆メモ: "200-300字目安。以下の順で記述：①このH3で読者が理解すべきこと1点 ②具体的な情報・論点（提供データに基づくものは出典明記） ③参照推奨記事（「参照：○位記事」形式、URLがある場合のみ）"
+    ハルシネーション防止: "具体的な数値・事例・固有名詞は、提供されたデータに存在するもののみ記載。不明な場合は『（要調査）』と明記"
   固定順序:
     最後2つ: ["FAQ（ある場合）", "まとめ"]
     FAQ:
@@ -748,7 +831,7 @@ ${referenceMaterialContext}
     まとめ:
       フォーマット: "まとめ：${keyword}を含むサブタイトル"
       H3数: 0
-      writingNote: "記事要点を3-5点で総括し、最後にアステックペイントのアパマン修繕サービスへの問い合わせを自然に案内する（記事テーマの延長線上で）"
+      writingNote: "記事要点を3-5点で総括し、最後に記事テーマに関連する地域の専門業者（取引先情報が提供されている場合は取引先名、ない場合は『地域の専門業者』等の一般表現）への相談を自然に案内する。※本部名（アステックペイント／プロタイムズ本部）を呼びかけ主語にしない。※施工件数・創業年数などの具体数値は提供データに記載がある場合のみ記載し、記載がない場合は『豊富な施工実績』『地域密着』等の定性表現を使用する"
       
   数字付き見出し:
     条件: "「○選」「○つのポイント」など内容として数を示す場合のみ"
@@ -761,16 +844,23 @@ ${referenceMaterialContext}
       - "通常のH2には番号を付けない"
 
 【JSON形式で出力】
-重要: outline配列内のsubheadingsの総数が${minH3Count}個以上になるようにしてください（上限なし）。
+重要: outline配列内のsubheadingsの総数は${maxH3Total}個以下にしてください（文字数5,000〜6,000字厳守）。
+重要: outline配列の要素数（H2数）は${maxH2Count}個以下にしてください。
 注意: H2とH3で意味が重複しないよう、H3は具体的な要素分解にすること。
 
 {
   "title": "タイトル",
   "metaDescription": "メタディスクリプション",
-  "introductions": {
-    "empathy": "共感型の導入文"
+  "searchIntentAnalysis": {
+    "problem": "読者が抱えている具体的な問題（1〜2文）",
+    "information": "問題解決に必要な情報（1〜2文）",
+    "desiredOutcome": "読後に読者がなりたい状態（1文）"
   },
-  "targetAudience": "ターゲット読者",
+  "articlePurpose": "この記事の目的・読者の状態変化ストーリーを1段落で説明（例：外壁塗装の費用が不安な施主が、相場と仕組みを理解し、業者選びに自信を持てるようになる記事）",
+  "introductions": {
+    "empathy": "共感型の導入文（searchIntentAnalysis.problemを反映した、読者の悩みを代弁する書き出し）"
+  },
+  "targetAudience": "ターゲット読者（searchIntentAnalysis.problemを抱える具体的な人物像）",
   "outline": [
     {
       "heading": "SEO対策とは？基本から理解する",
@@ -802,17 +892,16 @@ ${referenceMaterialContext}
 }`;
 
   try {
-    const model = genAI.getGenerativeModel({
-      model: "gemini-2.5-pro",
-      generationConfig: {
+    const result = await genAI.models.generateContent({
+      model: "gemini-3.1-pro-preview",
+      contents: prompt,
+      config: {
         temperature: 0.5, // バランス重視（創造性と正確性）
         maxOutputTokens: 16000, // トークン数を増やして詳細な構成を生成可能に
         responseMimeType: "application/json"
       }
     });
-
-    const result = await model.generateContent(prompt);
-    let responseText = result.response.text();
+    let responseText = result.text || '';
     
     // JSONの前後の不要な文字を削除
     responseText = responseText.replace(/^```json\s*/i, '').replace(/\s*```$/i, '');
@@ -904,9 +993,10 @@ ${referenceMaterialContext}
     }
     
     // 導入文の処理（後方互換性を保つため、conclusionFirstも含める）
+    const rawIntroductions = generatedData.introductions || {};
     const introductions: IntroductionPatterns = {
-      conclusionFirst: generatedData.introductions.conclusionFirst || generatedData.introductions.empathy || '',
-      empathy: generatedData.introductions.empathy || ''
+      conclusionFirst: rawIntroductions.conclusionFirst || rawIntroductions.empathy || '',
+      empathy: rawIntroductions.empathy || ''
     };
     
     // H3の「0 or 2以上」ルールを適用（1個の場合は0個にする）
@@ -940,20 +1030,87 @@ ${referenceMaterialContext}
       };
     });
     
-    // H3の総数をチェック
-    const currentH3Total = adjustedOutline.reduce((sum, section) => sum + section.subheadings.length, 0);
-    
-    // H3が不足している場合は警告のみ（チェックエージェントで修正）
-    if (currentH3Total < minH3Count) {
-      console.warn(`⚠️ H3数が不足: ${currentH3Total}個 / 必要${minH3Count}個`);
-      console.log('チェックエージェントで修正します...');
+    // ── コード強制①：H2数の上限を7本に絞る（文字数最優先）──
+    let finalOutline = adjustedOutline;
+    if (finalOutline.length > maxH2Count) {
+      console.warn(`⚠️ H2数超過: ${finalOutline.length}本 → ${maxH2Count}本に削減（文字数優先）`);
+      // 末尾2本（まとめ・自社訴求）は必ず保護
+      const fixedTail = finalOutline.slice(-2);
+      const contentSections = finalOutline.slice(0, -2);
+
+      // FAQセクションがあれば保護してから削減
+      const faqIdx = contentSections.findIndex(s => /FAQ|よくある質問/.test(s.heading));
+      const trimTarget = maxH2Count - 2; // まとめ・自社訴求の2本分を引く
+
+      if (faqIdx !== -1) {
+        const faqSection = contentSections[faqIdx];
+        const others = contentSections.filter(function(_, i) { return i !== faqIdx; });
+        const trimmedOthers = others.slice(0, trimTarget - 1);
+        finalOutline = trimmedOthers.concat([faqSection]).concat(fixedTail);
+      } else {
+        finalOutline = contentSections.slice(0, trimTarget).concat(fixedTail);
+      }
+      console.log(`✅ H2数調整完了: ${finalOutline.length}本`);
     }
-    
+
+    // ── コード強制②：H3総数の上限を12個に絞る（文字数最優先）──
+    let currentH3Total = finalOutline.reduce((sum, section) => sum + section.subheadings.length, 0);
+    if (currentH3Total > maxH3Total) {
+      console.warn(`⚠️ H3数超過: ${currentH3Total}個 → ${maxH3Total}個に削減（文字数優先）`);
+      // まとめ・自社訴求（末尾2本）以外のセクションからH3を削減
+      let remaining = maxH3Total;
+      finalOutline = finalOutline.map(function(section, index) {
+        const isFixedTail = index >= finalOutline.length - 2;
+        if (isFixedTail) {
+          // まとめ・自社訴求はそのまま（まとめは0個、自社訴求は2〜3個）
+          remaining -= section.subheadings.length;
+          return section;
+        }
+        // コンテンツセクションのH3を余裕に応じて配分（最大3個）
+        const cap = Math.min(3, remaining > 0 ? remaining : 0);
+        const trimmedSubs = section.subheadings.length <= cap
+          ? section.subheadings
+          : section.subheadings.slice(0, cap === 1 ? 0 : cap); // 1個になる場合は0個に
+        remaining -= trimmedSubs.length;
+        return {
+          heading: section.heading,
+          subheadings: trimmedSubs,
+          imageSuggestion: section.imageSuggestion,
+          writingNote: section.writingNote
+        };
+      });
+      currentH3Total = finalOutline.reduce((sum, section) => sum + section.subheadings.length, 0);
+      console.log(`✅ H3数調整完了: ${currentH3Total}個`);
+    }
+
+    // ── コード強制③：「○選」「○つ」型H2の見出し数字を実際のH3数に揃える ──
+    // H3を削った結果、「5つのコツ」なのにH3が3つ、のような不整合を防ぐ
+    finalOutline = finalOutline.map(function(section) {
+      const numPattern = /(\d+)(選|つ|個|点|社|本|か所|箇所)/;
+      const match = section.heading.match(numPattern);
+      if (!match) return section; // 数字パターンなし → そのまま
+
+      const declaredNum = parseInt(match[1]);
+      const actualNum = section.subheadings.length;
+
+      if (actualNum === 0 || declaredNum === actualNum) return section; // 一致 or H3なし → そのまま
+
+      // 数字を実際のH3数に更新
+      const newHeading = section.heading.replace(numPattern, actualNum + match[2]);
+      console.log(`🔄 H2見出し数字を修正: 「${section.heading}」→「${newHeading}」`);
+      return {
+        heading: newHeading,
+        subheadings: section.subheadings,
+        imageSuggestion: section.imageSuggestion,
+        writingNote: section.writingNote
+      };
+    });
+
     // 競合比較サマリの作成
     const competitorComparison: CompetitorComparisonSummary = {
       averageH2Count,
       averageH3Count,
-      ourH2Count: adjustedOutline.length,
+      ourH2Count: finalOutline.length,
       ourH3Count: currentH3Total,
       freshnessRisks: freshnessData.outdatedSections,
       differentiators: generatedData.differentiators || [
@@ -962,20 +1119,34 @@ ${referenceMaterialContext}
         '独自の成功事例を3件追加'
       ]
     };
-    
+
+    // searchIntentAnalysis と articlePurpose をログで確認
+    if (generatedData.searchIntentAnalysis) {
+      const sia = generatedData.searchIntentAnalysis;
+      console.log('\n📐 検索意図3軸分析:');
+      console.log(`   Problem: ${sia.problem || '—'}`);
+      console.log(`   Information: ${sia.information || '—'}`);
+      console.log(`   Desired Outcome: ${sia.desiredOutcome || '—'}`);
+    }
+    if (generatedData.articlePurpose) {
+      console.log(`\n🎯 記事の目的: ${generatedData.articlePurpose}`);
+    }
+
     return {
       title: adjustedTitle,
       metaDescription: adjustedMetaDescription,
       introductions,
       targetAudience: generatedData.targetAudience,
-      outline: adjustedOutline,
+      outline: finalOutline,
       conclusion: generatedData.conclusion,
-      keywords: [...mustIncludeWords, ...generatedData.keywords].slice(0, 15),
+      searchIntentAnalysis: generatedData.searchIntentAnalysis || null,
+      articlePurpose: generatedData.articlePurpose || '',
+      keywords: [...mustIncludeWords, ...(Array.isArray(generatedData.keywords) ? generatedData.keywords : [])].slice(0, 15),
       characterCountAnalysis: {
-        average: averageCharCount || competitorResearch.recommendedWordCount?.optimal || 5000,
-        median: averageCharCount || competitorResearch.recommendedWordCount?.optimal || 5000,
-        min: competitorResearch.recommendedWordCount?.min || 3000,
-        max: competitorResearch.recommendedWordCount?.max || 8000,
+        average: averageCharCount || (competitorResearch.recommendedWordCount ? competitorResearch.recommendedWordCount.optimal : 5000) || 5000,
+        median: averageCharCount || (competitorResearch.recommendedWordCount ? competitorResearch.recommendedWordCount.optimal : 5000) || 5000,
+        min: competitorResearch.recommendedWordCount ? competitorResearch.recommendedWordCount.min : 3000,
+        max: competitorResearch.recommendedWordCount ? competitorResearch.recommendedWordCount.max : 8000,
         analyzedArticles: validArticles.length || 10
       },
       competitorComparison,

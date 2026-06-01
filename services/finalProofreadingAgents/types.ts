@@ -97,6 +97,7 @@ export interface IntegrationResult {
     structureRules: number;     // 18点満点（旧15点から+3点）
     legalCompliance: number;    // 7点満点（旧5点から+2点）
     overallQuality: number;     // 5点満点（変更なし）
+    conciseness?: number;       // 簡潔性・重複の少なさ（参考指標）
     total: number;              // 100点満点
   };
   recommendation: 'publish' | 'revise' | 'reject';

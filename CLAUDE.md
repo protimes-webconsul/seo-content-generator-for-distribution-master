@@ -16,7 +16,7 @@ SEO最適化された記事構成・記事本文を自動生成するツール�
 # フロントエンド（:5176）
 npm run dev
 
-# スクレイピングサーバー（:3001）
+# スクレイピングサーバー（:3010）
 npm run server
 # または: cd server && node scraping-server.js
 
@@ -32,7 +32,7 @@ npm run build
 ### 起動確認
 
 ```bash
-curl http://localhost:3001/api/health
+curl http://localhost:3010/api/health
 # 期待値: {"status":"ok","message":"スクレイピングサーバーは正常に動作しています"}
 ```
 
@@ -43,7 +43,7 @@ curl http://localhost:3001/api/health
 | ポート | 用途 |
 |--------|------|
 | 5176 | メインアプリ（Vite） |
-| 3001 | スクレイピングサーバー（Puppeteer） |
+| 3010 | スクレイピングサーバー（Puppeteer） |
 | 5177 | 画像生成エージェント（予約済み） |
 | 5178 | 新規エージェント用（予約済み） |
 | 3002 | 追加APIサーバー用（予約済み） |
@@ -64,7 +64,7 @@ VITE_API_URL            # APIのベースURL
 
 `VITE_` プレフィックスのある変数のみブラウザ側で参照可能。`GEMINI_API_KEY` は Vite の `define` 設定で `process.env.GEMINI_API_KEY` としても注入している（`vite.config.ts` 参照）。
 
-Vite のプロキシ設定により `/api/*` は `localhost:3001` へ転送される。
+Vite のプロキシ設定により `/api/*` は `localhost:3010` へ転送される。
 
 ---
 

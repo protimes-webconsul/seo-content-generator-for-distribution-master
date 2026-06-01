@@ -1,7 +1,7 @@
 // GCP Cloud Run APIクライアント
 
 const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:3001";
+  process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:3010";
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY;
 
 // APIリクエストのヘッダー設定

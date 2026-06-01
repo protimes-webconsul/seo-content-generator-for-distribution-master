@@ -1,0 +1,5 @@
+{
+  "watch": ["scraping-server.js", "api/", "config/"],
+  "ignore": ["data/", "*.json", "node_modules/"],
+  "ext": "js,cjs"
+}

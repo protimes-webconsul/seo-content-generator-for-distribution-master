@@ -134,7 +134,7 @@ npm run dev
 npm run server
 ```
 
-→ `http://localhost:3001/` で起動します
+→ `http://localhost:3010/` で起動します
 
 ---
 
@@ -159,7 +159,7 @@ npm run dev
 | 確認項目 | URL | 正常なら |
 |---------|-----|---------|
 | メインアプリ | http://localhost:5176/ | ツールの画面が表示される |
-| バックエンドサーバー（競合調査） | http://localhost:3001/api/health | `{"status":"ok"...}` と表示される |
+| バックエンドサーバー（競合調査） | http://localhost:3010/api/health | `{"status":"ok"...}` と表示される |
 | 画像生成（使う場合のみ） | http://localhost:5177/ | 画像生成の画面が表示される |
 
 ---

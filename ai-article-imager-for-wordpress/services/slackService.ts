@@ -17,7 +17,7 @@ interface SlackMessage {
 
 class SlackService {
   private readonly SLACK_NOTIFY_URL = `${
-    import.meta.env.VITE_API_URL || "http://localhost:3001/api"
+    import.meta.env.VITE_API_URL || "http://localhost:3010/api"
   }/slack-notify`;
   private readonly MENTION_USER_ID = import.meta.env.VITE_SLACK_MENTION_USER_ID || ""; // 環境変数から取得
 

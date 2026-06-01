@@ -24,9 +24,18 @@ export default defineConfig(({ mode }) => {
       strictPort: true,
       proxy: {
         "/api": {
-          target: "http://localhost:3001",
+          target: "http://localhost:3010",
           changeOrigin: true,
           secure: false,
+          configure: function(proxy) {
+            proxy.on('error', function(err, req, res) {
+              console.error('[Vite Proxy Error]', err.message, req.url);
+              if (!res.headersSent) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Proxy error: ' + err.message }));
+              }
+            });
+          },
         },
       },
     },

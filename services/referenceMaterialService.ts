@@ -34,7 +34,7 @@ function getApiBase(): string {
   if (backendUrl) {
     return String(backendUrl);
   }
-  return "http://localhost:3001";
+  return "http://localhost:3010";
 }
 
 function getApiKey(): string {

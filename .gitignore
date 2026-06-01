@@ -26,6 +26,7 @@ dist-ssr
 
 # Credentials / tokens (never distribute)
 *.pickle
+server/config/wp-credentials.json
 
 # Editor directories and files
 .vscode/*
@@ -42,5 +43,14 @@ data/*-backup.json
 # Reference materials (uploaded files and extracted text)
 data/reference-materials/files/
 data/reference-materials/extracted/
+
+# Saved articles (local storage, not for distribution)
+server/data/articles/
+
+# Writing style samples (local storage, not for distribution)
+server/data/writing-styles/
+
+# Review HTML files (local storage, not for distribution)
+server/data/reviews/
 *.traineddata
 .claude/settings.local.json

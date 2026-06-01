@@ -146,7 +146,7 @@ app.use(cors({
 ### API通信の実装（フロントエンド側）
 ```typescript
 // services/api.ts
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3010';
 
 export const api = {
   googleSearch: async (query: string) => {

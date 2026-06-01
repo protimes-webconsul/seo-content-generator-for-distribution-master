@@ -259,6 +259,27 @@ export class IntegrationAgent extends BaseProofreadingAgent {
     // 総合品質
     scores.overallQuality = agentResults.every(r => r.status === 'success' || r.status === 'partial-success') ? 5 : 3;
 
+    // 簡潔性スコア（参考指標：重複・冗長 issue の少なさで評価）
+    // 全エージェントの issue から重複・冗長関連を集計
+    const allIssues: any[] = [];
+    agentResults.forEach(function (r) {
+      if (r.issues) {
+        r.issues.forEach(function (i: any) {
+          allIssues.push(i);
+        });
+      }
+    });
+    const duplicateIssueCount = allIssues.filter(function (i) {
+      const desc = (i.description || '') + (i.category || '');
+      return /重複|冗長|繰り返し|同一内容|コピペ/.test(desc);
+    }).length;
+    // 重複 issue 0件→100点、1件→80点、2件→60点、3件以上→40点
+    const concisenessScore = duplicateIssueCount === 0 ? 100
+      : duplicateIssueCount === 1 ? 80
+      : duplicateIssueCount === 2 ? 60
+      : 40;
+    (scores as any).conciseness = concisenessScore;
+
     // 合計
     scores.total = Math.round(
       scores.factChecking +
@@ -326,6 +347,13 @@ ${!passed && regulationScore.total >= 70 ? '- **次回合格条件**: 75点以�
 3. 構成・執筆ルール: ${regulationScore.structureRules.toFixed(1)}/18点
 4. 法的コンプライアンス: ${regulationScore.legalCompliance.toFixed(1)}/7点
 5. 総合品質: ${regulationScore.overallQuality}/5点
+
+## 品質指標（参考）
+- 読みやすさ：${regulationScore.structureRules >= 16 ? '★★★★☆' : regulationScore.structureRules >= 12 ? '★★★☆☆' : '★★☆☆☆'}
+- SEO：${regulationScore.factChecking >= 40 ? '★★★★☆' : regulationScore.factChecking >= 30 ? '★★★☆☆' : '★★☆☆☆'}
+- 訴求力：${regulationScore.overallQuality >= 5 ? '★★★★☆' : '★★★☆☆'}
+- 専門性：${regulationScore.reliability >= 22 ? '★★★★☆' : regulationScore.reliability >= 15 ? '★★★☆☆' : '★★☆☆☆'}
+- 簡潔性（重複の少なさ）：${(regulationScore as any).conciseness >= 100 ? '★★★★★' : (regulationScore as any).conciseness >= 80 ? '★★★★☆' : (regulationScore as any).conciseness >= 60 ? '★★★☆☆' : '★★☆☆☆'}
 
 ## 検出された問題
 - 重大な問題: ${criticalIssues.length}件

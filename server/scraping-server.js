@@ -16,7 +16,7 @@ const chromium = require("@sparticuz/chromium");
 require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
 
 const app = express();
-const PORT = process.env.PORT || 3001; // Renderでは環境変数PORTを使用
+const PORT = process.env.PORT || 3010; // Renderでは環境変数PORTを使用
 
 // Renderのプロキシ設定（Rate Limitingエラー対策）
 app.set("trust proxy", true);
@@ -35,6 +35,8 @@ const allowedOrigins = [
   "http://127.0.0.1:5176",
   "http://localhost:5177", // 画像生成エージェント
   "http://127.0.0.1:5177",
+  "http://localhost:5179", // 入稿ツール②
+  "http://127.0.0.1:5179",
   // 環境変数で追加設定（本番環境用）
   process.env.PRODUCTION_DOMAIN,   // 本番ドメイン
   process.env.SEO_FRONTEND_URL,    // SEOエージェントのURL
@@ -100,7 +102,7 @@ app.use((req, res, next) => {
 // Rate Limiting（レート制限）
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15分
-  max: 100, // 最大100リクエスト
+  max: process.env.NODE_ENV === "production" ? 100 : 2000, // 開発環境では上限を大きく
   message: { error: "Too many requests, please try again later." },
   standardHeaders: true,
   legacyHeaders: false,
@@ -168,7 +170,7 @@ let browser = null;
 // 記事完了ベースの再起動カウンター
 let articlesCompleted = 0;
 const RESTART_AFTER_ARTICLES =
-  parseInt(process.env.RESTART_AFTER_ARTICLES) || 1; // 1記事ごとに再起動
+  parseInt(process.env.RESTART_AFTER_ARTICLES) || 999; // デフォルト: 再起動なし（開発環境）
 
 // URL検証関数（SSRF攻撃対策）
 function isValidUrl(url) {
@@ -279,6 +281,11 @@ async function initBrowser() {
           headless: true,
           ignoreHTTPSErrors: true,
           protocolTimeout: 60000, // 60秒のタイムアウト
+          // Puppeteer自身のSIGINT/SIGTERM/SIGHUPハンドラを無効化
+          // → シグナル受信時に Puppeteer が process.exit() を呼ばないようにする
+          handleSIGINT: false,
+          handleSIGTERM: false,
+          handleSIGHUP: false,
           args: [
             "--no-sandbox",
             "--disable-setuid-sandbox",
@@ -572,197 +579,100 @@ app.post("/api/scrape", async (req, res) => {
   }
 });
 
-// APIエンドポイント：複数URLの一括スクレイピング
-app.post("/api/scrape-multiple", async (req, res) => {
-  const { urls } = req.body;
+// APIエンドポイント：複数URLの一括スクレイピング（サブプロセス分離版）
+// Chromiumをサブプロセス(scraping-worker.js)で起動することで、
+// ChromiumクラッシュがメインサーバーのNode.jsプロセスに波及しない。
+app.post("/api/scrape-multiple", function(req, res) {
+  var urls = req.body && req.body.urls ? req.body.urls : null;
 
   if (!urls || !Array.isArray(urls)) {
     return res.status(400).json({ error: "URLの配列が必要です" });
   }
 
-  // URL数の上限チェック（DoS対策）
   if (urls.length > 50) {
     return res.status(400).json({ error: "一度に処理できるURLは50個までです" });
   }
 
-  // 全URLの検証
-  for (const url of urls) {
-    const validation = isValidUrl(url);
+  for (var vi = 0; vi < urls.length; vi++) {
+    var validation = isValidUrl(urls[vi]);
     if (!validation.valid) {
       return res.status(400).json({
-        error: `無効なURLが含まれています: ${url} - ${validation.error}`,
+        error: '無効なURLが含まれています: ' + urls[vi] + ' - ' + validation.error,
       });
     }
   }
 
-  try {
-    console.log(`📋 ${urls.length}件のURLをスクレイピング開始`);
+  console.log('📋 ' + urls.length + '件のURLをスクレイピング開始（サブプロセス分離）');
 
-    // 🚀 並列処理数を環境変数で制御（メモリ効率重視）
-    const CONCURRENT_LIMIT = parseInt(process.env.CONCURRENT_LIMIT) || 3;
-    console.log(`🔧 並列処理数: ${CONCURRENT_LIMIT}個（メモリ効率重視）`);
+  var spawnFn = require('child_process').spawn;
+  var workerPath = require('path').join(__dirname, 'scraping-worker.js');
+  var workerTimer = null;
 
-    // メモリ使用量を監視
-    const memStart = process.memoryUsage();
-    const startMB = Math.round(memStart.heapUsed / 1024 / 1024);
-    console.log(`🧠 処理開始時メモリ: ${startMB}MB`);
+  var worker = spawnFn(process.execPath, [workerPath], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: process.env,
+  });
 
-    const results = [];
+  var stdoutBuf = '';
+  var stderrBuf = '';
 
-    // URLを並列処理用にバッチに分割
-    const batches = [];
-    for (let i = 0; i < urls.length; i += CONCURRENT_LIMIT) {
-      batches.push(urls.slice(i, i + CONCURRENT_LIMIT));
+  worker.stdout.on('data', function(d) { stdoutBuf += d; });
+  worker.stderr.on('data', function(d) {
+    stderrBuf += d;
+    // stderrをそのままサーバーログに流す（診断用）
+    process.stderr.write('[scraping-worker] ' + d);
+  });
+
+  worker.on('error', function(err) {
+    if (workerTimer) { clearTimeout(workerTimer); workerTimer = null; }
+    console.error('❌ スクレイピングワーカー起動エラー:', err.message);
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: 'Worker spawn error: ' + err.message });
     }
+  });
 
-    console.log(`📦 ${batches.length}個のバッチで処理開始`);
+  worker.on('exit', function(code, signal) {
+    if (workerTimer) { clearTimeout(workerTimer); workerTimer = null; }
+    console.log('🔚 スクレイピングワーカー終了 (code=' + code + ', signal=' + signal + ')');
 
-    // バッチごとに並列処理
-    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-      const batch = batches[batchIndex];
-      console.log(
-        `[バッチ ${batchIndex + 1}/${batches.length}] ${
-          batch.length
-        }個のURLを並列処理中...`
-      );
+    if (res.headersSent) return;
 
-      // バッチ内のURLを並列処理
-      const batchPromises = batch.map(async (url, index) => {
-        const globalIndex = batchIndex * CONCURRENT_LIMIT + index + 1;
-        console.log(`  [${globalIndex}/${urls.length}] 処理中: ${url}`);
-
-        // 🚀 重いサイトの事前検出とスキップ
-        const heavySitePatterns = [
-          /youtube\.com/i,
-          /facebook\.com/i,
-          /instagram\.com/i,
-          /twitter\.com/i,
-          /tiktok\.com/i,
-          /netflix\.com/i,
-          /amazon\.com.*\/dp\//i, // Amazon商品ページ
-          /\.pdf$/i,
-        ];
-
-        const isHeavySite = heavySitePatterns.some((pattern) =>
-          pattern.test(url)
-        );
-        if (isHeavySite) {
-          console.log(`  ⚡ 重いサイトを検出、スキップ: ${url}`);
-          return {
-            url,
-            h1: "",
-            h2Items: [],
-            characterCount: 0,
-            error: "重いサイトのためスキップされました（502エラー対策）",
-          };
-        }
-
-        // PDFファイルはスキップ
-        if (url.toLowerCase().endsWith(".pdf")) {
-          console.log(`  📑 PDFファイルをスキップ: ${url}`);
-          return {
-            url,
-            h1: "",
-            h2Items: [],
-            characterCount: 0,
-            error: "PDFファイルはスクレイピングできません",
-          };
-        }
-
-        const result = await scrapeHeadings(url);
-        if (result.success) {
-          console.log(`  ✅ 成功: ${url}`);
-          return {
-            url,
-            ...result.data,
-          };
-        } else {
-          console.log(`  ⚠️ 失敗: ${url} - ${result.error}`);
-          return {
-            url,
-            h1: "",
-            h2Items: [],
-            characterCount: 0,
-            error: result.error,
-          };
-        }
-      });
-
-      // バッチ内の並列処理を実行
-      const batchResults = await Promise.all(batchPromises);
-      results.push(...batchResults);
-
-      // 🧠 バッチ完了後のメモリ監視
-      const memAfterBatch = process.memoryUsage();
-      const batchMB = Math.round(memAfterBatch.heapUsed / 1024 / 1024);
-      console.log(`📊 バッチ${batchIndex + 1}完了後メモリ: ${batchMB}MB`);
-
-      // メモリ使用量が高い場合は追加の待機時間
-      const BATCH_WAIT_MS = parseInt(process.env.BATCH_WAIT_MS) || 3000;
-      const extraWaitMs = batchMB > 400 ? 2000 : 0; // 400MB超えたら追加2秒
-
-      // バッチ間で待機（メモリ安定化とサーバー負荷軽減）
-      if (batchIndex < batches.length - 1) {
-        const totalWaitMs = BATCH_WAIT_MS + extraWaitMs;
-        console.log(
-          `⏳ 次のバッチまで${totalWaitMs / 1000}秒待機...${
-            extraWaitMs > 0 ? " (高メモリ使用のため延長)" : ""
-          }`
-        );
-        await new Promise((resolve) => setTimeout(resolve, totalWaitMs));
-
-        // 強制ガベージコレクション
-        if (global.gc) {
-          global.gc();
-          const memAfterGC = process.memoryUsage();
-          const afterGCMB = Math.round(memAfterGC.heapUsed / 1024 / 1024);
-          console.log(
-            `🗑️ GC後メモリ: ${afterGCMB}MB (${batchMB - afterGCMB}MB削減)`
-          );
-        }
+    if (code === 0) {
+      try {
+        var result = JSON.parse(stdoutBuf);
+        console.log('✅ スクレイピング完了 成功率:' + (result.memoryReport ? result.memoryReport.successRate + '%' : '不明'));
+        res.json(result);
+      } catch (parseErr) {
+        console.error('❌ ワーカー出力のパースエラー:', parseErr.message);
+        res.status(500).json({ success: false, error: 'Worker output parse error: ' + parseErr.message });
       }
+    } else {
+      var errMsg = stderrBuf ? stderrBuf.slice(0, 500) : ('exit code ' + code);
+      console.error('❌ スクレイピングワーカー異常終了:', errMsg);
+      res.status(500).json({ success: false, error: 'Scraping worker failed: ' + errMsg });
     }
+  });
 
-    // 🎯 処理完了時の総合レポート
-    const memEnd = process.memoryUsage();
-    const endMB = Math.round(memEnd.heapUsed / 1024 / 1024);
-    const memoryDiff = endMB - startMB;
-
-    console.log("✅ 全てのスクレイピング完了");
-    console.log(`📊 メモリレポート:`);
-    console.log(`   開始時: ${startMB}MB`);
-    console.log(`   終了時: ${endMB}MB`);
-    console.log(`   差分: ${memoryDiff > 0 ? "+" : ""}${memoryDiff}MB`);
-    console.log(`   処理URL数: ${urls.length}個`);
-    console.log(
-      `   成功率: ${Math.round(
-        (results.filter((r) => !r.error).length / results.length) * 100
-      )}%`
-    );
-
-    res.json({
-      success: true,
-      results,
-      memoryReport: {
-        startMB,
-        endMB,
-        memoryDiff,
-        processedUrls: urls.length,
-        successRate: Math.round(
-          (results.filter((r) => !r.error).length / results.length) * 100
-        ),
-      },
-    });
-  } catch (error) {
-    console.error("❌ 一括スクレイピングエラー:", error);
-    res.status(500).json({
-      success: false,
-      error:
-        process.env.NODE_ENV === "production"
-          ? "Internal server error"
-          : error.message,
-    });
+  // URLリストをstdinに送信してワーカーを開始
+  try {
+    worker.stdin.write(JSON.stringify({ urls: urls }));
+    worker.stdin.end();
+  } catch (stdinErr) {
+    console.error('❌ ワーカーへのデータ送信エラー:', stdinErr.message);
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: 'Worker stdin error: ' + stdinErr.message });
+    }
+    return;
   }
+
+  // 15分タイムアウト（念のため）
+  workerTimer = setTimeout(function() {
+    console.error('⏰ スクレイピングワーカータイムアウト（15分）— 強制終了');
+    try { worker.kill('SIGKILL'); } catch (e) {}
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: 'Scraping worker timeout (15min)' });
+    }
+  }, 15 * 60 * 1000);
 });
 
 // ヘルスチェック
@@ -804,15 +714,13 @@ app.post("/api/article-completed", (req, res) => {
     console.log(`🔄 ${RESTART_AFTER_ARTICLES}記事完了、ブラウザを再起動します`);
 
     if (browser) {
-      browser
-        .close()
-        .then(() => {
-          console.log("✅ ブラウザを正常にクローズしました");
-        })
-        .catch((error) => {
-          console.log("⚠️ ブラウザクローズエラー（無視）:", error.message);
-        });
-      browser = null;
+      var closingBrowser = browser;
+      browser = null; // 先にnullに設定してから非同期クローズ
+      Promise.resolve(closingBrowser.close()).then(function() {
+        console.log("✅ ブラウザを正常にクローズしました");
+      }).catch(function(error) {
+        console.log("⚠️ ブラウザクローズエラー（無視）:", error && error.message ? error.message : String(error));
+      });
     }
 
     // カウンターをリセット
@@ -1364,6 +1272,187 @@ app.post("/api/wordpress/create-post", async (req, res) => {
   }
 });
 
+// ────────────────────────────────────────────────
+// 取引先管理 API（Google Sheets 連携）
+// ────────────────────────────────────────────────
+const clientsRouter = require("./api/clients");
+app.use("/api/clients", clientsRouter);
+
+// ────────────────────────────────────────────────
+// 記事保存・管理 API（ローカルファイル）
+// ────────────────────────────────────────────────
+const articlesRouter = require("./api/articles");
+app.use("/api/articles", articlesRouter);
+
+// ────────────────────────────────────────────────
+// 執筆スタイルサンプル API（ローカルファイル）
+// ────────────────────────────────────────────────
+const writingStylesRouter = require("./api/writing-styles");
+app.use("/api/writing-styles", writingStylesRouter);
+
+// ────────────────────────────────────────────────
+// レビュー依頼 API（ローカル保存 + Sheets追記）
+// ────────────────────────────────────────────────
+const reviewRouter = require("./api/review");
+app.use("/api/review", reviewRouter);
+
+// ────────────────────────────────────────────────
+// ファクトDB API（取引先ごとのファクト取得）
+// ────────────────────────────────────────────────
+const clientFactsRouter = require("./api/client-facts");
+app.use("/api/client-facts", clientFactsRouter);
+
+// ────────────────────────────────────────────────
+// 夜間バッチ処理 API（キュー管理 + Sheets連携）
+// ────────────────────────────────────────────────
+const batchRouter = require("./api/batch");
+app.use("/api/batch", batchRouter);
+
+// ────────────────────────────────────────────────
+// キーワード管理バッチ API（Spreadsheet連携）
+// ────────────────────────────────────────────────
+const outlineBatchRouter = require("./api/outline-batch");
+app.use("/api/outline-batch", outlineBatchRouter);
+
+// ────────────────────────────────────────────────
+// .docx → HTML 変換 API（入稿ツール②用）
+// POST /api/docx-convert
+// ────────────────────────────────────────────────
+const docxConvertRouter = require("./api/docx-convert");
+app.use("/api/docx-convert", docxConvertRouter);
+
+// レビューHTMLファイルを静的配信（LAN内アクセス用）
+const reviewsStaticDir = path.join(__dirname, "data/reviews");
+if (!require("fs").existsSync(reviewsStaticDir)) {
+  require("fs").mkdirSync(reviewsStaticDir, { recursive: true });
+}
+app.use("/reviews", express.static(reviewsStaticDir));
+
+// ────────────────────────────────────────────────
+// WordPress 下書き保存エンドポイント（取引先ごと）
+// POST /api/wordpress/draft
+// body: { clientId, title, content, categoryId }
+// 認証情報は server/config/wp-credentials.json から取得
+// WordPress URL・ユーザー名は Google Sheets (wordpress_settings) から取得
+// ────────────────────────────────────────────────
+app.post("/api/wordpress/draft", async (req, res) => {
+  const body = req.body || {};
+  const clientId = body.clientId || "";
+  const title = body.title || "";
+  const content = body.content || "";
+  const categoryId = body.categoryId || 0;
+
+  if (!clientId || !title || !content) {
+    return res.status(400).json({ error: "clientId, title, content は必須です。" });
+  }
+
+  // wp-credentials.json から認証情報を取得
+  let wpCredentials = {};
+  try {
+    const credPath = path.join(__dirname, "config", "wp-credentials.json");
+    wpCredentials = require(credPath);
+  } catch (credErr) {
+    console.warn("⚠️ wp-credentials.json が見つかりません:", credErr.message);
+  }
+
+  const clientCred = wpCredentials[clientId] || {};
+  const wpAppPassword = clientCred.wp_app_password || "";
+
+  // WordPress 設定を Google Sheets から取得
+  let wpUrl = "";
+  let wpUsername = "";
+  const spreadsheetId = process.env.SPREADSHEET_ID || "";
+
+  if (spreadsheetId) {
+    try {
+      const sheetsAuth = require("./sheetsAuth.cjs");
+      const wpRows = await sheetsAuth.readRange(spreadsheetId, "wordpress_settings!A2:D");
+      const wpRow = wpRows.find(function(r) { return r[0] === clientId; });
+      if (wpRow) {
+        wpUrl = wpRow[1] || "";
+        wpUsername = wpRow[2] || "";
+      }
+    } catch (sheetsErr) {
+      console.warn("⚠️ WordPress設定の取得に失敗:", sheetsErr.message);
+    }
+  }
+
+  // 設定が不完全な場合はフォールバック（シングルクライアント環境変数）
+  if (!wpUrl) {
+    wpUrl = process.env.WP_BASE_URL || process.env.VITE_WP_BASE_URL || "";
+  }
+  if (!wpUsername) {
+    wpUsername = process.env.WP_USERNAME || process.env.VITE_WP_USERNAME || "";
+  }
+  if (!wpAppPassword) {
+    const fallbackPass = process.env.WP_APP_PASSWORD || process.env.VITE_WP_APP_PASSWORD || "";
+    if (fallbackPass) {
+      wpCredentials[clientId] = { wp_app_password: fallbackPass };
+    }
+  }
+
+  const finalAppPassword = (wpCredentials[clientId] && wpCredentials[clientId].wp_app_password) || "";
+
+  if (!wpUrl || !wpUsername || !finalAppPassword) {
+    console.error("❌ WordPress設定が不完全です（clientId:", clientId, "）");
+    return res.status(500).json({
+      error: "WordPress の設定が不完全です。wp-credentials.json または .env を確認してください。",
+    });
+  }
+
+  try {
+    const postData = {
+      title: title,
+      content: content,
+      status: "draft",
+    };
+    if (categoryId) {
+      postData.categories = [categoryId];
+    }
+
+    const apiUrl = wpUrl.replace(/\/+$/, "") + "/wp-json/wp/v2/posts";
+    const authHeader =
+      "Basic " + Buffer.from(wpUsername + ":" + finalAppPassword).toString("base64");
+
+    console.log("📝 WordPress 下書き保存中... clientId:", clientId, "url:", apiUrl);
+    console.log("🔑 使用ユーザー名:", wpUsername);
+    console.log("🔑 パスワード取得元:", wpCredentials[clientId] ? "wp-credentials.json" : ".env フォールバック");
+    console.log("🔑 パスワード末尾4字:", finalAppPassword ? finalAppPassword.slice(-4) : "(空)");
+
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: authHeader,
+      },
+      body: JSON.stringify(postData),
+    });
+
+    if (!response.ok) {
+      const rawText = await response.text().catch(function() { return ''; });
+      console.error("❌ WordPress 下書き保存失敗 HTTP", response.status, response.statusText);
+      console.error("❌ WP レスポンス本文（先頭500字）:", rawText.substring(0, 500));
+      let errorMsg = response.statusText;
+      try {
+        const parsed = JSON.parse(rawText);
+        errorMsg = parsed.message || errorMsg;
+      } catch (e) { /* HTML レスポンスの場合は無視 */ }
+      return res.status(response.status).json({
+        error: "WordPress への下書き保存に失敗しました: HTTP " + response.status + " " + errorMsg,
+      });
+    }
+
+    const data = await response.json();
+    console.log("✅ WordPress 下書き保存成功 - ID:", data.id, "URL:", data.link);
+    res.json({ id: data.id, link: data.link, editLink: wpUrl.replace(/\/+$/, "") + "/wp-admin/post.php?post=" + data.id + "&action=edit" });
+  } catch (error) {
+    console.error("❌ WordPress 下書き保存エラー:", error.message);
+    res.status(500).json({
+      error: process.env.NODE_ENV === "production" ? "Internal server error" : error.message,
+    });
+  }
+});
+
 // グローバルエラーハンドラー
 app.use((err, req, res, next) => {
   console.error("Unhandled error:", err);
@@ -1376,14 +1465,18 @@ app.use((err, req, res, next) => {
 });
 
 // プロセスエラーハンドリング
+// ※ process.exit(1) はサーバーを強制終了させるため削除
+//   → ログだけ出してサーバーは継続稼働させる
 process.on("uncaughtException", (err) => {
-  console.error("❌ Uncaught Exception:", err);
-  process.exit(1);
+  console.error("❌ Uncaught Exception (server continues):", err && err.message ? err.message : String(err));
+  console.error(err);
+  // process.exit(1); ← 削除: これがサーバークラッシュの原因だった
 });
 
 process.on("unhandledRejection", (reason, promise) => {
-  console.error("❌ Unhandled Rejection at:", promise, "reason:", reason);
-  process.exit(1);
+  var msg = reason && reason.message ? reason.message : String(reason);
+  console.error("❌ Unhandled Rejection (server continues):", msg);
+  // process.exit(1); ← 削除: これがサーバークラッシュの原因だった
 });
 
 // サーバー起動
@@ -1402,6 +1495,12 @@ const server = app.listen(PORT, "0.0.0.0", () => {
    - GET /api/wordpress/config (WordPress設定取得)
    - POST /api/wordpress/upload-image (WordPress画像アップロード)
    - POST /api/wordpress/create-post (WordPress記事作成)
+   - POST /api/wordpress/draft (取引先別 WordPress下書き保存)
+   - GET  /api/clients (取引先一覧)
+   - GET  /api/clients/:id (取引先詳細)
+   - POST /api/clients (取引先登録)
+   - PUT  /api/clients/:id (取引先更新)
+   - DELETE /api/clients/:id (取引先削除)
    - POST /api/test (テスト用)
    - GET /api/health (ヘルスチェック)
   `);
@@ -1429,6 +1528,49 @@ const server = app.listen(PORT, "0.0.0.0", () => {
   }
 
   console.log("🔥 SERVER IS READY TO RECEIVE REQUESTS!");
+});
+
+// ────────────────────────────────────────────────
+// Express エラーハンドリングミドルウェア（4引数必須）
+// async ルートハンドラーが next(err) を呼んだ場合や
+// express-async-errors 的な捕捉に備える
+// ────────────────────────────────────────────────
+app.use(function(err, req, res, next) {
+  console.error('🔴 Express error handler caught:', err && err.message ? err.message : String(err));
+  console.error(err);
+  if (!res.headersSent) {
+    res.status(500).json({ error: err && err.message ? err.message : 'Internal server error' });
+  }
+});
+
+// ────────────────────────────────────────────────
+// Node.js グローバル例外ハンドラー
+// async ルートが try-catch なしでスローした場合のクラッシュ防止
+// ────────────────────────────────────────────────
+process.on('unhandledRejection', function(reason, promise) {
+  console.error('🔴 unhandledRejection detected:');
+  console.error(reason);
+});
+
+process.on('uncaughtException', function(err) {
+  console.error('🔴 uncaughtException detected:', err && err.message ? err.message : String(err));
+  console.error(err);
+  // クラッシュせず継続
+});
+
+// プロセス終了時に必ず理由を出力（どんな原因でも捕捉）
+process.on('exit', function(code) {
+  console.error('🔴🔴🔴 SERVER PROCESS EXITING - exit code:', code);
+});
+
+process.on('SIGTERM', function() {
+  console.error('🔴 SIGTERM received - server shutting down');
+  process.exit(0);
+});
+
+process.on('SIGBREAK', function() {
+  console.error('🔴 SIGBREAK received');
+  process.exit(0);
 });
 
 // 終了時の処理

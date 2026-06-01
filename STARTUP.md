@@ -25,7 +25,7 @@ npm run dev
 ## 📌 アクセスURL
 
 - **アプリ**: http://localhost:5176/
-- **Puppeteerサーバー**: http://localhost:3001/
+- **Puppeteerサーバー**: http://localhost:3010/
 
 ## 🛠 トラブルシューティング
 
@@ -33,7 +33,7 @@ npm run dev
 ```bash
 # プロセスを確認
 lsof -i :5176
-lsof -i :3001
+lsof -i :3010
 
 # プロセスを終了
 pkill -f vite

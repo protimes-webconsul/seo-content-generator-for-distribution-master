@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
-import type { SeoOutline, SeoOutlineV2, SubheadingWithNote } from "../types";
+import type { SeoOutline, SeoOutlineV2, SubheadingWithNote, ClientProfile } from "../types";
+import { saveWordPressDraft } from "../services/clientDataService";
 import {
   generateArticle,
   regenerateSection,
@@ -34,6 +35,10 @@ import LoadingSpinner from "./LoadingSpinner";
 import { slackNotifier } from "../services/slackNotificationService";
 import { extractCautionNotes } from "../utils/extractCautionNotes";
 import { generateSlug } from "../services/slugGenerator";
+import { downloadExportFile, downloadHtmlForFranchise } from "../services/articleExportService";
+import { parseImportFile, readFileAsText } from "../services/articleImportService";
+import { saveRevisionLog } from "../services/revisionLogService";
+import { runClaudeQualityCheck } from "../services/claudeQualityService";
 
 /**
  * Issueオブジェクトのoriginalフィールドを安全に文字列化
@@ -121,6 +126,9 @@ interface ArticleWriterProps {
     autoMode?: boolean;
   }) => void; // 画像生成エージェントをiframeで開く
   referenceMaterialContext?: string; // 参考資料テキスト（任意）
+  clientProfile?: ClientProfile; // 取引先プロフィール（任意）
+  writingStyleSample?: string; // 執筆スタイルサンプル（任意）
+  customOutlineMarkdown?: string; // 手動編集した構成案マークダウン（任意）
 }
 
 const ArticleWriter: React.FC<ArticleWriterProps> = ({
@@ -137,6 +145,9 @@ const ArticleWriter: React.FC<ArticleWriterProps> = ({
   skipAutoGenerate = false,
   onOpenImageAgent,
   referenceMaterialContext,
+  clientProfile,
+  writingStyleSample,
+  customOutlineMarkdown,
 }) => {
   // デバッグ：受け取ったデータを確認
   console.log("ArticleWriter received:", {
@@ -161,6 +172,14 @@ const ArticleWriter: React.FC<ArticleWriterProps> = ({
     metaDescription: string;
     htmlContent: string;
     plainText: string;
+  } | null>(null);
+
+  // WordPress 下書き保存
+  const [isPostingDraft, setIsPostingDraft] = useState(false);
+  const [draftPostResult, setDraftPostResult] = useState<{
+    id: number;
+    link: string;
+    editLink: string;
   } | null>(null);
   const [viewMode, setViewMode] = useState<"preview" | "code">("code");
   const [isEditing, setIsEditing] = useState(false);
@@ -198,6 +217,16 @@ const ArticleWriter: React.FC<ArticleWriterProps> = ({
   const [showRestoreDialog, setShowRestoreDialog] = useState(false); // 復元ダイアログの表示状態
   const [savedData, setSavedData] = useState<any>(null); // 保存されているデータ
   const [lastSaveTime, setLastSaveTime] = useState<Date | null>(null); // 最後の保存時刻
+
+  // 最終チェック エクスポート・インポート
+  const [importReport, setImportReport] = useState<string | null>(null); // インポート時の修正レポート
+  const importFileInputRef = useRef<HTMLInputElement>(null);
+
+  // ── Claude品質チェック（テスト用） ──────────────────────
+  const [isClaudeProcessing, setIsClaudeProcessing] = useState(false);
+  const [claudeReport, setClaudeReport] = useState<string | null>(null);
+  const [claudeRevisedHtml, setClaudeRevisedHtml] = useState<string | null>(null);
+  const [showClaudeReport, setShowClaudeReport] = useState(false);
 
   // フルオート関連のステート
   const [autoMode, setAutoMode] = useState<
@@ -259,13 +288,12 @@ const ArticleWriter: React.FC<ArticleWriterProps> = ({
           headings: [],
         };
 
-        // 構成案をマークダウン形式に変換
-        const outlineMarkdown = convertOutlineToMarkdown(
-          actualOutline,
-          keyword
-        );
+        // 構成案をマークダウン形式に変換（手動編集版があればそちらを優先）
+        const outlineMarkdown = customOutlineMarkdown && customOutlineMarkdown.trim()
+          ? customOutlineMarkdown.trim()
+          : convertOutlineToMarkdown(actualOutline, keyword);
 
-        // Ver.3エージェントで生成
+        // Ver.3エージェントで生成（セクション分割）
         const v3Result = await generateArticleV3({
           outline: outlineMarkdown,
           keyword: keyword,
@@ -273,6 +301,9 @@ const ArticleWriter: React.FC<ArticleWriterProps> = ({
           tone: "professional",
           useGrounding: true, // Grounding機能有効（最新情報を検索しながら執筆）
           referenceMaterialContext: referenceMaterialContext,
+          clientProfile: clientProfile,
+          writingStyleSample: writingStyleSample,
+          onProgress: function(msg: string) { setGenerationProgress(msg); },
         });
 
         // 一時的に保存（チェック後にクリーンアップするため）
@@ -759,11 +790,174 @@ ${article.plainText}`;
     URL.revokeObjectURL(url);
   };
 
+  // 最終チェック用エクスポート
+  const handleExportForCheck = () => {
+    if (!article) return;
+    const outlineMd = customOutlineMarkdown
+      ? customOutlineMarkdown
+      : convertOutlineToMarkdown(outline, keyword);
+    downloadExportFile({
+      keyword,
+      clientName: clientProfile ? clientProfile.name : undefined,
+      articleTitle: article.title,
+      metaDescription: article.metaDescription,
+      articleHtml: article.htmlContent,
+      outlineMarkdown: outlineMd,
+    });
+  };
+
+  // 加盟店確認用 .html 書き出し（入稿ツール②で直接インポート可能な形式）
+  const handleExportDocxForFranchise = () => {
+    if (!article) return;
+    try {
+      downloadHtmlForFranchise({
+        keyword,
+        clientId: clientProfile ? clientProfile.id : '',
+        clientName: clientProfile ? clientProfile.name : undefined,
+        articleTitle: article.title,
+        metaDescription: article.metaDescription,
+        articleHtml: article.htmlContent,
+      });
+    } catch (err) {
+      alert('HTML書き出しエラー: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  };
+
+  // 最終チェック済み記事インポート
+  const handleImportChecked = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files ? e.target.files[0] : null;
+    if (!file) return;
+    // input をリセットして同じファイルを再選択できるようにする
+    e.target.value = '';
+
+    try {
+      const content = await readFileAsText(file);
+      const result = parseImportFile(content);
+
+      if (!result.success) {
+        alert('インポートエラー:\n' + result.error);
+        return;
+      }
+
+      // 記事を更新
+      const plainText = result.articleHtml.replace(/<[^>]+>/g, '');
+      const updatedArticle = {
+        title: article ? article.title : keyword,
+        metaDescription: article ? article.metaDescription : '',
+        htmlContent: result.articleHtml,
+        plainText,
+      };
+      setArticle(updatedArticle);
+      if (onArticleGenerated) {
+        onArticleGenerated(updatedArticle);
+      }
+
+      // 修正レポートを表示
+      setImportReport(result.reportText);
+
+      // 修正ログに保存
+      saveRevisionLog({
+        keyword,
+        clientName: clientProfile ? clientProfile.name : '',
+        modificationCount: result.modificationCount,
+        reportText: result.reportText,
+      });
+
+      alert(
+        '修正済み記事をインポートしました。\n修正件数: ' +
+          result.modificationCount +
+          '件\n\n修正ログに記録しました。'
+      );
+    } catch (err) {
+      alert(
+        'ファイル読み込みエラー: ' +
+          (err instanceof Error ? err.message : String(err))
+      );
+    }
+  };
+
+  // ── Claude品質チェック ─────────────────────────────────
+  const handleClaudeQualityCheck = async () => {
+    if (!article) return;
+    setIsClaudeProcessing(true);
+    setClaudeReport(null);
+    setClaudeRevisedHtml(null);
+    setShowClaudeReport(false);
+
+    try {
+      const result = await runClaudeQualityCheck({
+        article: article.htmlContent,
+        keyword: keyword,
+        title: article.title,
+        metaDescription: article.metaDescription,
+        clientProfile: clientProfile,
+      });
+      setClaudeReport(result.checkReport);
+      setClaudeRevisedHtml(result.revisedHtml);
+      setShowClaudeReport(true);
+    } catch (err) {
+      alert(
+        'Claude品質チェックエラー: ' +
+          (err instanceof Error ? err.message : String(err))
+      );
+    } finally {
+      setIsClaudeProcessing(false);
+    }
+  };
+
+  // Claude修正済み記事を適用
+  const handleApplyClaudeRevision = () => {
+    if (!claudeRevisedHtml || !article) return;
+    const updatedArticle = {
+      title: article.title,
+      metaDescription: article.metaDescription,
+      htmlContent: claudeRevisedHtml,
+      plainText: claudeRevisedHtml.replace(/<[^>]+>/g, ''),
+    };
+    setArticle(updatedArticle);
+    if (onArticleGenerated) {
+      onArticleGenerated(updatedArticle);
+    }
+    setShowClaudeReport(false);
+    alert('Claude加工済み記事を適用しました。');
+  };
+
   // コピー機能
   const handleCopyHtml = () => {
     if (!article) return;
     navigator.clipboard.writeText(article.htmlContent);
     alert("HTMLコードをコピーしました");
+  };
+
+  // WordPress 下書き保存
+  const handleSaveWordPressDraft = async () => {
+    if (!article) return;
+    if (!clientProfile) {
+      alert("取引先が選択されていません。キーワード入力画面で取引先を選択してください。");
+      return;
+    }
+    if (!clientProfile.wordpressSettings || !clientProfile.wordpressSettings.wpUrl) {
+      alert("選択中の取引先に WordPress 設定が登録されていません。\n取引先管理画面で WordPress URL を設定してください。");
+      return;
+    }
+
+    setIsPostingDraft(true);
+    setDraftPostResult(null);
+
+    try {
+      const content = isEditing ? editedContent : article.htmlContent;
+      const result = await saveWordPressDraft({
+        clientId: clientProfile.id,
+        title: article.title,
+        content: content,
+        categoryId: clientProfile.wordpressSettings.defaultCategoryId || 0,
+      });
+      setDraftPostResult(result);
+    } catch (err) {
+      alert("WordPress 下書き保存に失敗しました:\n" + (err instanceof Error ? err.message : "不明なエラー"));
+    } finally {
+      setIsPostingDraft(false);
+    }
   };
 
   // 最終校閲機能（マルチエージェント10エージェント版）
@@ -2139,7 +2333,7 @@ ${
         outline,
         regulation,
         {
-          targetCharCount: outline.characterCountAnalysis?.average || 30000,
+          targetCharCount: 5500, // 自社設定値5,000〜6,000字の中央値（競合平均は使用しない）
           checkFrequencyWords: true,
         }
       );
@@ -2315,6 +2509,28 @@ ${
 
               {/* アクションボタン */}
               <div className="flex gap-2 ml-auto">
+                {/* Claude品質チェックボタン（テスト用） */}
+                <button
+                  onClick={handleClaudeQualityCheck}
+                  disabled={isClaudeProcessing || isFinalProofreading}
+                  className="px-4 py-2 bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 disabled:from-gray-300 disabled:to-gray-300 text-white rounded-lg transition-all flex items-center gap-2 font-semibold shadow-md"
+                  title="Claude品質チェック：ハルシネーション除去・AI文体リライト（テスト用）"
+                >
+                  {isClaudeProcessing ? (
+                    <>
+                      <span className="animate-pulse">🧠</span>
+                      Claude処理中...
+                    </>
+                  ) : (
+                    <>
+                      🧠 Claude品質チェック
+                      <span className="text-xs bg-white/20 px-2 py-0.5 rounded">
+                        TEST
+                      </span>
+                    </>
+                  )}
+                </button>
+
                 <div className="flex items-center gap-2">
                   <button
                     onClick={handleFinalProofread}
@@ -2387,6 +2603,25 @@ ${
                 >
                   HTMLコピー
                 </button>
+                {clientProfile && (
+                  <button
+                    onClick={handleSaveWordPressDraft}
+                    disabled={isPostingDraft}
+                    className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors shadow-sm disabled:opacity-50"
+                  >
+                    {isPostingDraft ? "送信中..." : "WP 下書き保存"}
+                  </button>
+                )}
+                {draftPostResult && (
+                  <a
+                    href={draftPostResult.editLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-4 py-2 bg-green-100 text-green-700 rounded-lg border border-green-300 text-sm hover:bg-green-200"
+                  >
+                    ✅ 下書き確認
+                  </a>
+                )}
                 <button
                   onClick={handleDownload}
                   className="px-4 py-2 bg-green-500 hover:bg-green-600 text-white rounded-lg transition-colors shadow-sm"
@@ -2399,6 +2634,23 @@ ${
                 >
                   HTML DL
                 </button>
+                <button
+                  onClick={handleExportDocxForFranchise}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition-colors shadow-sm"
+                  title="加盟店確認用HTMLファイルを書き出し（入稿ツールで再インポート可）"
+                >
+                  📤 加盟店用HTML書き出し
+                </button>
+                <label className="px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-lg transition-colors shadow-sm cursor-pointer">
+                  📥 修正済みDL
+                  <input
+                    ref={importFileInputRef}
+                    type="file"
+                    accept=".md,.txt"
+                    className="hidden"
+                    onChange={handleImportChecked}
+                  />
+                </label>
               </div>
             </div>
           )}
@@ -2847,6 +3099,70 @@ ${
                         : "大幅な修正が必要"}
                     </div>
                   </div>
+
+                  {/* 最終チェック エクスポート・インポート */}
+                  <div className="mt-4 p-4 bg-indigo-50 rounded-lg border border-indigo-200">
+                    <p className="text-xs font-semibold text-indigo-700 mb-3">
+                      📤 ClaudeProject で最終チェック
+                    </p>
+                    <p className="text-xs text-indigo-600">
+                      上部ツールバーの「📤 チェック用DL」「📥 修正済みDL」ボタンをご利用ください。
+                    </p>
+                    {importReport && (
+                      <div className="mt-3 p-3 bg-white rounded border border-indigo-100 text-xs text-gray-700 whitespace-pre-wrap max-h-40 overflow-y-auto">
+                        <p className="font-semibold text-indigo-600 mb-1">修正レポート</p>
+                        {importReport}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Claude品質チェック レポートパネル（テスト用） */}
+              {showClaudeReport && claudeReport && (
+                <div className="w-96 bg-amber-50 p-4 overflow-auto border-l border-amber-200">
+                  <div className="flex justify-between items-start mb-4">
+                    <h3 className="text-lg font-semibold text-amber-800 flex items-center gap-2">
+                      🧠 Claude品質チェック
+                      <span className="text-xs bg-amber-200 text-amber-800 px-2 py-0.5 rounded">
+                        TEST
+                      </span>
+                    </h3>
+                    <button
+                      onClick={() => setShowClaudeReport(false)}
+                      className="text-gray-500 hover:text-gray-700 transition-colors"
+                      title="閉じる"
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  {/* チェックレポート */}
+                  <div className="mb-4 p-3 bg-white rounded-lg border border-amber-200 text-xs text-gray-700 whitespace-pre-wrap max-h-80 overflow-y-auto leading-relaxed">
+                    {claudeReport}
+                  </div>
+
+                  {/* 修正済み記事の適用 */}
+                  {claudeRevisedHtml ? (
+                    <div className="space-y-2">
+                      <p className="text-xs text-amber-700 font-semibold">
+                        ✅ 修正済み記事が生成されました
+                      </p>
+                      <button
+                        onClick={handleApplyClaudeRevision}
+                        className="w-full px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-sm font-semibold transition-colors"
+                      >
+                        この修正を記事に適用する
+                      </button>
+                      <p className="text-xs text-gray-500">
+                        ※ 適用後も「元に戻す」は手動で対応してください
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-red-500">
+                      ⚠️ 修正済み記事が取得できませんでした。レポートを確認してください。
+                    </p>
+                  )}
                 </div>
               )}
             </>

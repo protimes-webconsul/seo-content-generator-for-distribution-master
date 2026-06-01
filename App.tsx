@@ -4,12 +4,29 @@ import type {
   SeoOutlineV2,
   GroundingChunk,
   CompetitorResearchResult,
+  ClientProfile,
+  ClientSummary,
+  SavedArticle,
+  WritingStyleSample,
+  OutlineMode,
 } from "./types";
+import ClientManager from "./components/ClientManager";
+import ArticleList from "./components/ArticleList";
+import WritingStyleManager from "./components/WritingStyleManager";
+import { fetchClients, fetchClientById } from "./services/clientDataService";
+import {
+  saveOutline,
+  saveArticle,
+  updateSavedArticle,
+} from "./services/articleStorageService";
+import { fetchWritingStyle, buildCombinedStyleText } from "./services/writingStyleService";
 import { generateSeoOutline } from "./services/geminiServiceUpdated";
 import { generateCompetitorResearch } from "./services/competitorResearchWithWebFetch";
 import { generateOptimizedOutline } from "./services/outlineOptimizer";
 import { generateOutlineV2 } from "./services/outlineGeneratorV2";
+import { generateOutlineSiteDataMode } from "./services/outlineGeneratorSiteData";
 import { checkAndFixOutline } from "./services/outlineCheckerV2";
+import { reviseOutlineV2 } from "./services/outlineRevisionService";
 // import { runQualityCheck } from './services/qualityCheckAgent';  // 一時的に無効化（キーワード削除問題）
 import { getTestOutlineV2 } from "./utils/testDataGeneratorV2";
 import KeywordInputForm from "./components/KeywordInputForm";
@@ -27,14 +44,18 @@ import TextCheckPage from "./components/TextCheckPage";
 import ReferenceMaterialManager from "./components/ReferenceMaterialManager";
 import ReferenceMaterialSelector from "./components/ReferenceMaterialSelector";
 import { buildPromptContext, analyzeForArticle } from "./services/referenceMaterialService";
-import AutoProgressDisplay, {
-  type AutoStep,
-} from "./components/AutoProgressDisplay";
-import { slackNotifier } from "./services/slackNotificationService";
+import RevisionLogTab from "./components/RevisionLogTab";
+import BatchMode from "./components/BatchMode";
+import KeywordManager from "./components/KeywordManager";
+import type { BatchQueueItem } from "./services/batchService";
+import { generateArticleV3 } from "./services/writingAgentV3";
 import FactCheckPage from "./components/FactCheckPage";
 import ArticleRevisionForm from "./components/ArticleRevisionForm";
 import { useImageAgent, type ArticleDataForImageAgent } from "./hooks/useImageAgent";
 import { ImageGeneratorIframe } from "./components/ImageGeneratorIframe";
+import { downloadExportFile } from "./services/articleExportService";
+import { parseImportFile, readFileAsText } from "./services/articleImportService";
+import { saveRevisionLog } from "./services/revisionLogService";
 
 const App: React.FC = () => {
   const [currentPage, setCurrentPage] = useState<
@@ -51,8 +72,21 @@ const App: React.FC = () => {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<
-    "research" | "frequency" | "outline" | "article" | "references"
+    "research" | "frequency" | "outline" | "article" | "references" | "clients" | "articleList" | "writingStyle" | "batch" | "keywordManager" | "revisionLog"
   >("research");
+
+  // 記事保存管理
+  const [savedArticleId, setSavedArticleId] = useState<string | null>(null);
+  const [isOutlineSaved, setIsOutlineSaved] = useState(false);
+  const [isArticleSaved, setIsArticleSaved] = useState(false);
+
+  // 取引先管理
+  const [clientSummaries, setClientSummaries] = useState<ClientSummary[]>([]);
+  const [selectedClientId, setSelectedClientId] = useState<string>("");
+  const [clientProfile, setClientProfile] = useState<ClientProfile | null>(null);
+
+  // 執筆スタイルサンプル
+  const [writingStyleSample, setWritingStyleSample] = useState<WritingStyleSample | null>(null);
 
   // 参考資料の選択状態
   const [selectedRefMaterialIds, setSelectedRefMaterialIds] = useState<string[]>([]);
@@ -70,91 +104,162 @@ const App: React.FC = () => {
     plainText: string;
   } | null>(null);
   const [showArticleWriter, setShowArticleWriter] = useState(false);
-  const [writingMode, setWritingMode] = useState<"v1" | "v2" | "v3">("v1");
+  const [writingMode, setWritingMode] = useState<"v2" | "v3">("v3");
   const [isV2Mode, setIsV2Mode] = useState<boolean>(false);
+  const [outlineMode, setOutlineMode] = useState<OutlineMode>('siteData');
 
-  // フル自動モード用の状態
-  const [isFullAutoMode, setIsFullAutoMode] = useState<boolean>(false);
-  const [autoSteps, setAutoSteps] = useState<AutoStep[]>([]);
-  const [currentAutoStep, setCurrentAutoStep] = useState<number>(0);
-  const [isAutoRunning, setIsAutoRunning] = useState<boolean>(false);
-  const [autoArticleWriter, setAutoArticleWriter] = useState<boolean>(false);
 
-  // スプレッドシートモード用のキューシステム
-  const [keywordQueue, setKeywordQueue] = useState<
-    Array<{ row: number; keyword: string }>
-  >([]);
-  const [isProcessingQueue, setIsProcessingQueue] = useState<boolean>(false);
-  const [queueProgress, setQueueProgress] = useState<{
-    current: number;
-    total: number;
-  } | null>(null);
-  const [queueIndex, setQueueIndex] = useState<number>(0);
-  const [queueActive, setQueueActive] = useState<boolean>(false);
-  const [currentSpreadsheetRow, setCurrentSpreadsheetRow] = useState<
-    number | null
-  >(null);
 
-  // サーバー復旧待ち機能
-  const [isWaitingForServerRecovery, setIsWaitingForServerRecovery] =
-    useState<boolean>(false);
-  const [serverCheckInterval, setServerCheckInterval] =
-    useState<NodeJS.Timeout | null>(null);
-  const [recoveryAttempts, setRecoveryAttempts] = useState<number>(0);
-  const [lastFailedKeyword, setLastFailedKeyword] = useState<{
-    row: number;
-    keyword: string;
-  } | null>(null);
-
-  // キュー処理の二重実行を防ぐためのref
-  const queueIndexRef = useRef<number>(0);
-  const queueActiveRef = useRef<boolean>(false);
-  const keywordQueueRef = useRef<Array<{ row: number; keyword: string }>>([]);
-  const isLaunchingRef = useRef<boolean>(false); // Mutex: 起動中フラグ
-  const handleGenerateFullAutoRef = useRef<any>(null); // handleGenerateFullAutoの参照
-
-  // refを常に最新のstateに同期
+  // 取引先一覧を起動時に読み込む
   useEffect(() => {
-    queueIndexRef.current = queueIndex;
-  }, [queueIndex]);
+    fetchClients()
+      .then(function(list) {
+        const activeList = list.filter(function(c) { return c.isActive; });
+        setClientSummaries(activeList);
+      })
+      .catch(function(err) {
+        console.warn("⚠️ 取引先一覧の読み込みに失敗:", err.message);
+      });
+  }, []);
 
-  useEffect(() => {
-    queueActiveRef.current = queueActive;
-  }, [queueActive]);
+  // 取引先が選択されたらプロフィールを取得
+  const handleClientSelect = useCallback(async (clientId: string) => {
+    setSelectedClientId(clientId);
+    if (!clientId) {
+      setClientProfile(null);
+      setWritingStyleSample(null);
+      return;
+    }
+    try {
+      const profile = await fetchClientById(clientId);
+      setClientProfile(profile);
+      console.log("✅ 取引先プロフィール読み込み完了:", profile.name);
+    } catch (err) {
+      console.warn("⚠️ 取引先プロフィールの取得に失敗:", err instanceof Error ? err.message : err);
+      setClientProfile(null);
+    }
+    // 執筆スタイルサンプルを自動読み込み
+    try {
+      const style = await fetchWritingStyle(clientId);
+      setWritingStyleSample(style);
+      if (style) {
+        console.log("✅ 執筆スタイルサンプル読み込み完了（件数:", style.samples.length, "件）");
+      }
+    } catch (err) {
+      console.warn("⚠️ 執筆スタイルサンプルの取得に失敗:", err instanceof Error ? err.message : err);
+      setWritingStyleSample(null);
+    }
+  }, []);
 
-  // Keep-alive: フル自動モード処理中はバックエンドを5分ごとにpingしてアイドル終了を防ぐ
-  useEffect(() => {
-    // フル自動モード（単体 or スプシモード）の時に有効
-    if (!isFullAutoMode) return;
+  // ────────────────────────────────────────────────
+  // 記事保存ハンドラー
+  // ────────────────────────────────────────────────
 
-    const backendUrl = import.meta.env.VITE_BACKEND_URL || "http://localhost:3001";
+  const handleSaveOutline = async () => {
+    if (!outlineV2) return;
+    const id = await saveOutline({
+      clientId: selectedClientId || 'none',
+      clientName: clientProfile ? clientProfile.name : '未選択',
+      keyword: keyword,
+      outline: outlineV2,
+    });
+    setSavedArticleId(id);
+    setIsOutlineSaved(true);
+  };
 
-    const keepAlive = () => {
-      fetch(`${backendUrl}/api/health`)
-        .then(() => console.log("🏓 Keep-alive ping成功"))
-        .catch(() => console.warn("⚠️ Keep-alive ping失敗"));
-    };
+  const handleSaveArticle = async () => {
+    if (!generatedArticle) return;
+    if (savedArticleId) {
+      // 既存ファイルに記事を追記
+      await updateSavedArticle(savedArticleId, { article: generatedArticle });
+    } else {
+      // 新規保存（構成案なしで記事のみ）
+      const id = await saveArticle({
+        clientId: selectedClientId || 'none',
+        clientName: clientProfile ? clientProfile.name : '未選択',
+        keyword: keyword,
+        outline: outlineV2,
+        article: generatedArticle,
+      });
+      setSavedArticleId(id);
+    }
+    setIsArticleSaved(true);
+  };
 
-    // 開始時に1回ping
-    keepAlive();
+  // ────────────────────────────────────────────────
+  // チェック用エクスポート / 修正済みインポート
+  // ────────────────────────────────────────────────
 
-    // 5分ごとにping（Cloud Runのアイドルタイムアウトは約15分）
-    const interval = setInterval(keepAlive, 5 * 60 * 1000);
+  const handleExportForCheck = () => {
+    if (!generatedArticle) return;
+    downloadExportFile({
+      keyword: keyword,
+      clientName: clientProfile ? clientProfile.name : undefined,
+      articleTitle: generatedArticle.title,
+      metaDescription: generatedArticle.metaDescription,
+      articleHtml: generatedArticle.htmlContent,
+    });
+  };
 
-    console.log("🔄 Keep-alive開始（5分間隔）");
+  const handleImportChecked = async (file: File) => {
+    try {
+      const content = await readFileAsText(file);
+      const result = parseImportFile(content);
+      if (!result.success) {
+        alert('インポートエラー:\n' + result.error);
+        return;
+      }
+      setGeneratedArticle({
+        title: generatedArticle ? generatedArticle.title : keyword,
+        metaDescription: generatedArticle ? generatedArticle.metaDescription : '',
+        htmlContent: result.articleHtml,
+        plainText: result.articleHtml.replace(/<[^>]*>/g, ''),
+      });
+      setIsArticleSaved(false);
+      saveRevisionLog({
+        keyword: keyword,
+        clientName: clientProfile ? clientProfile.name : '',
+        modificationCount: result.modificationCount,
+        reportText: result.reportText,
+      });
+      alert('修正済み記事を取り込みました。\n修正件数: ' + result.modificationCount + '件\n\n修正ログに保存されました。');
+    } catch (e) {
+      alert('ファイルの読み込みに失敗しました: ' + (e instanceof Error ? e.message : String(e)));
+    }
+  };
 
-    return () => {
-      clearInterval(interval);
-      console.log("🔄 Keep-alive停止");
-    };
-  }, [isFullAutoMode]);
+  // ────────────────────────────────────────────────
+  // 記事一覧からの復元ハンドラー
+  // ────────────────────────────────────────────────
 
-  useEffect(() => {
-    keywordQueueRef.current = keywordQueue;
-  }, [keywordQueue]);
+  const handleRestoreOutline = (saved: SavedArticle) => {
+    if (saved.outline) {
+      setOutlineV2(saved.outline);
+      setKeyword(saved.keyword);
+      setIsV2Mode(true);
+      setSavedArticleId(saved.id);
+      setIsOutlineSaved(true);
+      setIsArticleSaved(false);
+      setGeneratedArticle(null);
+      setActiveTab('outline');
+    }
+  };
 
-  // キュー処理用のクリーンアップ関数をrefに保存
-  const cleanupQueueStateRef = useRef<() => void>();
+  const handleRestoreArticle = (saved: SavedArticle) => {
+    if (saved.outline) {
+      setOutlineV2(saved.outline);
+      setIsV2Mode(true);
+    }
+    if (saved.article) {
+      setGeneratedArticle(saved.article);
+      setActiveTab('article');
+    }
+    setKeyword(saved.keyword);
+    setSavedArticleId(saved.id);
+    setIsOutlineSaved(true);
+    setIsArticleSaved(true);
+  };
+
 
   // 画像生成エージェント用のフック
   const imageAgentCloseIframeRef = useRef<() => void>();
@@ -188,132 +293,6 @@ const App: React.FC = () => {
     imageAgentCloseIframeRef.current = closeImageAgentIframe;
   }, [closeImageAgentIframe]);
 
-  // クリーンアップ関数を更新
-  useEffect(() => {
-    cleanupQueueStateRef.current = () => {
-      console.log("🧹 キュー処理完了: 状態をクリーンアップ");
-      setKeywordQueue([]);
-      setQueueProgress(null);
-      setQueueIndex(0);
-      setQueueActive(false);
-      setIsProcessingQueue(false);
-      setCurrentSpreadsheetRow(null);
-      setIsFullAutoMode(false); // Keep-alive停止
-      setIsWaitingForServerRecovery(false);
-      setRecoveryAttempts(0);
-      setLastFailedKeyword(null);
-      if (serverCheckInterval) {
-        clearInterval(serverCheckInterval);
-        setServerCheckInterval(null);
-      }
-      localStorage.removeItem("currentSpreadsheetRow");
-    };
-  });
-
-  // ARTICLE_COMPLETED メッセージを受け取るuseEffect（循環依存を回避）
-  useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      // デバッグ: すべてのメッセージをログ出力
-      console.log("🔍 メッセージ受信:", {
-        origin: event.origin,
-        type: event.data?.type,
-        success: event.data?.success,
-        data: event.data,
-      });
-
-      // 一時的にオリジンチェックを無効化（デバッグ用）
-      // if (event.origin !== "http://localhost:5177") {
-      //   console.log(
-      //     "⚠️ 許可されていないオリジンからのメッセージ:",
-      //     event.origin
-      //   );
-      //   return;
-      // }
-
-      if (event.data?.type === "ARTICLE_COMPLETED") {
-        console.log("🎯 ARTICLE_COMPLETEDメッセージを検出:", {
-          origin: event.origin,
-          success: event.data?.success,
-          fullData: event.data,
-        });
-      }
-
-      if (event.data?.type !== "ARTICLE_COMPLETED" || !event.data?.success) {
-        console.log("⚠️ ARTICLE_COMPLETEDメッセージではありません");
-        return;
-      }
-
-      console.log("📨 記事完了通知を受信しました");
-
-      // 画像生成エージェントのiframeを閉じる
-      if (imageAgentCloseIframeRef.current) {
-        console.log("🚪 画像生成エージェントiframeを自動クローズします");
-        imageAgentCloseIframeRef.current();
-      }
-
-      // refで最新のqueueActiveを確認
-      if (!queueActiveRef.current) {
-        console.log("⚠️ キューが非アクティブです");
-        return;
-      }
-
-      // Mutexで二重起動を防ぐ
-      if (isLaunchingRef.current) {
-        console.warn(
-          "⚠️ すでに次のキーワードを起動中のため、完了通知をスキップしました"
-        );
-        return;
-      }
-
-      const nextIndex = queueIndexRef.current + 1;
-
-      if (nextIndex >= keywordQueueRef.current.length) {
-        console.log("🎉 すべてのキーワードの処理が完了しました！");
-        // refを使ってクリーンアップを実行
-        if (cleanupQueueStateRef.current) {
-          cleanupQueueStateRef.current();
-        }
-        return;
-      }
-
-      // Mutexロック
-      isLaunchingRef.current = true;
-
-      try {
-        const nextKeyword = keywordQueueRef.current[nextIndex];
-        console.log(
-          `\n🔄 次の記事処理開始: ${nextIndex + 1}/${
-            keywordQueueRef.current.length
-          }`
-        );
-        console.log(`📝 キーワード: ${nextKeyword.keyword}`);
-
-        // refとstateの両方を更新
-        queueIndexRef.current = nextIndex;
-        setQueueIndex(nextIndex);
-        setQueueProgress({
-          current: nextIndex,
-          total: keywordQueueRef.current.length,
-        });
-        setCurrentSpreadsheetRow(nextKeyword.row);
-        localStorage.setItem(
-          "currentSpreadsheetRow",
-          nextKeyword.row.toString()
-        );
-
-        // エラーハンドリング強化版を使用
-        handleGenerateFullAutoWithRecovery(nextKeyword.keyword, false, true);
-      } finally {
-        // 500ms後にMutex解除（handleGenerateFullAutoの初期化処理完了を待つ）
-        setTimeout(() => {
-          isLaunchingRef.current = false;
-        }, 500);
-      }
-    };
-
-    window.addEventListener("message", handleMessage);
-    return () => window.removeEventListener("message", handleMessage);
-  }, []); // 依存関係なしで循環依存を回避
 
   // テスト構成を使用
   const handleUseTestOutline = useCallback(
@@ -376,6 +355,10 @@ const App: React.FC = () => {
       setKeyword(newKeyword);
       setIsV2Mode(false);
       setApiUsageWarning(null);
+      // 新しい検索時に保存状態をリセット
+      setSavedArticleId(null);
+      setIsOutlineSaved(false);
+      setIsArticleSaved(false);
 
       try {
         // API使用回数のチェックと警告
@@ -516,15 +499,25 @@ const App: React.FC = () => {
           }
         }
 
-        // Ver.2構成案を生成
-        console.log("Generating SEO outline Ver.2...");
-        const v2Outline = await generateOutlineV2(
-          newKeyword,
-          researchResult,
-          includeImages,
-          true, // 導入文2パターン生成
-          refContext || undefined // 参考資料テキスト
-        );
+        // Ver.2構成案を生成（モードに応じて切り替え）
+        console.log("Generating SEO outline Ver.2... mode=" + outlineMode);
+        const v2Outline = outlineMode === 'siteData'
+          ? await generateOutlineSiteDataMode(
+              newKeyword,
+              researchResult,
+              includeImages,
+              true,
+              refContext || undefined,
+              clientProfile || undefined
+            )
+          : await generateOutlineV2(
+              newKeyword,
+              researchResult,
+              includeImages,
+              true, // 導入文2パターン生成
+              refContext || undefined, // 参考資料テキスト
+              clientProfile || undefined // 取引先ルール
+            );
 
         // 構成チェックと自動修正
         console.log("Checking and fixing outline...");
@@ -567,791 +560,114 @@ const App: React.FC = () => {
     []
   );
 
-  // フル自動実行ハンドラー
-  const handleGenerateFullAuto = useCallback(
-    async (
-      newKeyword: string,
-      includeImages: boolean,
-      isQueueRun: boolean = false
-    ) => {
-      if (!newKeyword.trim()) {
-        setError("キーワードを入力してください。");
-        return;
-      }
+  // ────────────────────────────────────────────────
+  // キーワード管理: SheetからOutlineを読み込んで構成案タブに反映
+  // ────────────────────────────────────────────────
 
-      // 初期化
-      setIsFullAutoMode(true);
-      setIsAutoRunning(true);
-      setIsLoading(true);
-      setError(null);
-      setOutline(null);
-      setOutlineV2(null);
-      setCompetitorResearch(null);
-      setSources(undefined);
-      setKeyword(newKeyword);
-      setGeneratedArticle(null);
-      setShowArticleWriter(false);
-      setApiUsageWarning(null);
-
-      // API使用回数のチェックと警告
-      const currentUsage = getApiUsageToday();
-      if (currentUsage >= 50) {
-        console.warn(
-          "⚠️ Custom Search API無料枠を超過しています。以降は従量課金（約1.5円/回）が発生します。"
-        );
-        setApiUsageWarning(
-          "無料枠超過中：従量課金（約1.5円/回）が発生しています"
-        );
-      }
-
-      // Slack通知: 開始
-      await slackNotifier.notifyStart({ keyword: newKeyword });
-
-      // ステップの初期化
-      const steps: AutoStep[] = [
-        {
-          id: "competitor-research",
-          title: "競合サイト分析",
-          description: "上位15サイトを分析して競合調査を実施",
-          status: "pending",
-        },
-        {
-          id: "outline-generation",
-          title: "構成案生成",
-          description: "SEO最適化された記事構成を生成",
-          status: "pending",
-        },
-        {
-          id: "outline-check",
-          title: "構成チェック＆品質確認",
-          description: "構成のルールチェックと自動修正",
-          status: "pending",
-        },
-        {
-          id: "article-writing",
-          title: "記事執筆",
-          description: "高品質な記事を一気に生成",
-          status: "pending",
-        },
-        {
-          id: "final-proofreading",
-          title: "校閲・自動修正",
-          description: "複数のAIエージェントで徹底的な品質チェック",
-          status: "pending",
-        },
-        {
-          id: "auto-revision",
-          title: "再校閲・問題なければ画像生成へ",
-          description: "校閲結果に基づいて次のステップへ",
-          status: "pending",
-        },
-        {
-          id: "image-generation",
-          title: "画像生成エージェント起動",
-          description: "記事に適した画像を自動生成",
-          status: "pending",
-        },
-      ];
-      setAutoSteps(steps);
-      setCurrentAutoStep(0);
-
-      try {
-        // Step 1: 競合分析
-        updateAutoStep(0, { status: "running" });
-        console.log("🚀 フル自動モード: Step 1 - 競合分析開始");
-
-        // 競合分析の開始時間を記録
-        await slackNotifier.notifyStepStart("competitor-research");
-
-        const researchResult = await generateCompetitorResearch(
-          newKeyword,
-          (current, total) => {
-            const progress = Math.round((current / total) * 100);
-            updateAutoStep(0, { progress });
-          },
-          true
-        );
-        setCompetitorResearch(researchResult);
-
-        // API使用回数をインクリメント（成功時のみ）
-        incrementApiUsage();
-
-        updateAutoStep(0, {
-          status: "completed",
-          result: `✅ ${researchResult.validArticles.length}サイトの分析完了`,
-        });
-
-        // Slack通知: 競合分析完了
-        await slackNotifier.notifyStepComplete({
-          keyword: newKeyword,
-          step: "competitor-research",
-          h2Count: researchResult.validArticles.length,
-        });
-
-        // Step 2: 構成生成Ver.2
-        updateAutoStep(1, { status: "running" });
-        console.log("🚀 フル自動モード: Step 2 - 構成生成開始");
-
-        // 構成生成の開始時間を記録
-        await slackNotifier.notifyStepStart("outline");
-
-        // 参考資料のAI分析（フル自動モード・E-E-A-T強化用）
-        let autoRefContext = "";
-        if (selectedRefMaterialIds.length > 0) {
-          try {
-            console.log("🔬 参考資料をAI分析中（フル自動・E-E-A-T強化）...");
-            autoRefContext = await analyzeForArticle(selectedRefMaterialIds, newKeyword);
-            setRefMaterialContext(autoRefContext);
-          } catch (err) {
-            console.error("⚠️ 参考資料AI分析失敗:", err);
-          }
-        }
-
-        const v2Outline = await generateOutlineV2(
-          newKeyword,
-          researchResult,
-          includeImages,
-          true,
-          autoRefContext || undefined // 参考資料テキスト
-        );
-
-        // v2Outlineの構造を確認
-        console.log("📝 生成された構成:", v2Outline);
-
-        // 正しいプロパティ名を使用（outlineが正しい）
-        const sections = v2Outline.outline || [];
-
-        updateAutoStep(1, {
-          status: "completed",
-          result: `✅ ${sections.length}個の見出しを含む構成生成完了`,
-          details: v2Outline, // 構成の詳細データを保存
-        });
-
-        // Slack通知: 構成生成完了
-        const h3Count = sections.reduce(
-          (sum, section) => sum + (section.subheadings?.length || 0),
-          0
-        );
-        await slackNotifier.notifyStepComplete({
-          keyword: newKeyword,
-          step: "outline",
-          h2Count: sections.length,
-          h3Count: h3Count,
-        });
-
-        // Step 3: 構成チェック
-        updateAutoStep(2, { status: "running" });
-        console.log("🚀 フル自動モード: Step 3 - 構成チェック開始");
-
-        // 構成チェックの開始時間を記録
-        await slackNotifier.notifyStepStart("check");
-
-        const { finalOutline, checkResult, wasFixed } =
-          await checkAndFixOutline(v2Outline, newKeyword, researchResult);
-
-        // 品質チェックエージェントをスキップ（キーワード削除問題のため一時的に無効化）
-        console.log(
-          "⚠️ 品質チェックエージェントをスキップ（キーワード削除問題のため）"
-        );
-        // const qualityCheckedOutline = await runQualityCheck(finalOutline, newKeyword);
-        setOutlineV2(finalOutline);
-        updateAutoStep(2, {
-          status: "completed",
-          result: wasFixed
-            ? `✅ 構成を自動修正し、品質チェック完了`
-            : `✅ 品質チェック完了（修正不要）`,
-          details: finalOutline, // 品質チェックをスキップしているのでfinalOutlineを使用
-        });
-
-        // Slack通知: 品質チェック完了（削除）
-        // await slackNotifier.notifyStepComplete({
-        //   keyword: newKeyword,
-        //   step: 'check',
-        //   score: 100 // チェックをスキップしているので仮の値
-        // });
-
-        // Step 4: 記事執筆（Ver.3）
-        updateAutoStep(3, { status: "running" });
-        console.log("🚀 フル自動モード: Step 4 - 記事執筆開始");
-
-        // ArticleWriterを自動モードで開く
-        setWritingMode("v3");
-        setAutoArticleWriter(true);
-        setShowArticleWriter(true);
-
-        // 記事生成、最終校閲、自動修正はArticleWriterコンポーネント内で処理される
-        // Step 4, 5, 6の完了はArticleWriterからのコールバックで処理される
-      } catch (err) {
-        console.error("❌ フル自動モードエラー:", err);
-        const errorStep = autoSteps.findIndex((s) => s.status === "running");
-        const stepName = errorStep >= 0 ? autoSteps[errorStep].id : "不明";
-
-        // サーバーエラーの場合は上位に伝播（復旧待ち処理のため）
-        const isServerError =
-          err instanceof Error &&
-          (err.message.includes("502") ||
-            err.message.includes("503") ||
-            err.message.includes("fetch") ||
-            err.message.includes("Failed to fetch") ||
-            err.message.includes("TypeError") ||
-            err.message.includes("RENDER_RESTART_REQUIRED") ||
-            err.message.includes("RENDER_SERVER_DOWN") ||
-            err.message.includes("Puppeteerによるページ取得に失敗"));
-
-        console.log("🔍 handleGenerateFullAuto エラー分析:", {
-          isServerError,
-          isQueueRun,
-          errorMessage: err instanceof Error ? err.message : "Unknown error",
-        });
-
-        // サーバーエラーかつキューモードの場合は、復旧待ち処理のためエラーを再投げ
-        if (isServerError && isQueueRun) {
-          console.log(
-            "🔄 サーバーエラーを上位に伝播します（復旧待ち処理のため）"
-          );
-          throw err; // エラーを再投げして上位の復旧待ち処理に委ねる
-        }
-
-        // その他のエラーの場合は従来通り処理
-        // Slack通知: エラー
-        await slackNotifier.notifyError({
-          keyword: newKeyword,
-          step: stepName,
-          error:
-            err instanceof Error ? err.message : "不明なエラーが発生しました",
-        });
-
-        if (errorStep >= 0) {
-          updateAutoStep(errorStep, {
-            status: "error",
-            error:
-              err instanceof Error ? err.message : "不明なエラーが発生しました",
-          });
-        }
-        setError(
-          err instanceof Error
-            ? err.message
-            : "フル自動実行中にエラーが発生しました。"
-        );
-      } finally {
-        setIsLoading(false);
-        setIsAutoRunning(false);
-        setIsFullAutoMode(false); // Keep-alive停止
-
-        // キュー実行中の場合、次のキーワードを起動（一時的に無効化）
-        // 画像生成エージェントからのARTICLE_COMPLETEDメッセージを待つため
-        // if (isQueueRun && queueActiveRef.current) {
-        //   console.log("⏭️ キュー実行中: 次のキーワードを起動します");
-        //   setTimeout(() => {
-        //     startNextKeywordFromQueue();
-        //   }, 1000); // 1秒待ってから次のキーワードを処理
-        // }
-      }
-    },
-    [] // 依存関係を削除してcircular dependencyを回避
-  );
-
-  // handleGenerateFullAutoをrefに保存（循環依存を回避）
-  useEffect(() => {
-    handleGenerateFullAutoRef.current = handleGenerateFullAuto;
-  }, [handleGenerateFullAuto]);
-
-  // サーバー生存確認関数
-  const checkServerHealth = useCallback(async (): Promise<boolean> => {
-    try {
-      const apiUrl =
-        import.meta.env.VITE_API_URL?.replace("/api", "") ||
-        import.meta.env.VITE_BACKEND_URL ||
-        "http://localhost:3001";
-
-      console.log("🏥 ヘルスチェック開始:", `${apiUrl}/api/health`);
-
-      const response = await fetch(`${apiUrl}/api/health`, {
-        method: "GET",
-        timeout: 10000, // 10秒タイムアウト
-      });
-
-      const isHealthy = response.ok;
-      console.log("🏥 ヘルスチェック応答:", {
-        status: response.status,
-        ok: response.ok,
-        isHealthy,
-      });
-
-      return isHealthy;
-    } catch (error) {
-      console.log("🔍 サーバーヘルスチェック失敗:", error);
-      return false;
-    }
+  const handleOutlineLoadedFromSheet = useCallback((outline: SeoOutlineV2, kw: string) => {
+    setOutlineV2(outline);
+    setKeyword(kw);
+    setIsV2Mode(true);
+    setOutline(null);
+    setSavedArticleId(null);
+    setIsOutlineSaved(false);
+    setIsArticleSaved(false);
+    setGeneratedArticle(null);
+    setActiveTab('outline');
   }, []);
 
-  // サーバー復旧待ち処理
-  const waitForServerRecovery = useCallback(
-    async (failedKeyword: { row: number; keyword: string }, error?: Error) => {
-      console.log("🔄 サーバーダウンを検知。復旧を待機します...");
-      console.log("🔍 失敗したキーワード:", failedKeyword);
-      console.log("🔍 エラー詳細:", error?.message);
-      console.log("🔍 復旧待ち処理開始時刻:", new Date().toLocaleTimeString());
+  // ────────────────────────────────────────────────
+  // 夜間バッチ処理ハンドラー
+  // ────────────────────────────────────────────────
 
-      setIsWaitingForServerRecovery(true);
-      setLastFailedKeyword(failedKeyword);
-      setRecoveryAttempts(0);
-
-      // Slack通知: サーバーダウン
-      await slackNotifier.notifyError({
-        keyword: failedKeyword.keyword,
-        step: "server-connection",
-        error: "サーバーがダウンしました。復旧を待機中...",
-      });
-
-      const maxAttempts = 60; // 最大60回（30分間）
-      let attempts = 0;
-
-      const checkInterval = setInterval(async () => {
-        attempts++;
-        setRecoveryAttempts(attempts);
-
-        console.log(`🔍 サーバー復旧チェック ${attempts}/${maxAttempts}...`);
-        console.log("⏰ 現在時刻:", new Date().toLocaleTimeString());
-        console.log("🔍 復旧待ち状態:", {
-          isWaitingForServerRecovery,
-          queueActive: queueActiveRef.current,
-          currentIndex: queueIndexRef.current,
-        });
-
-        const isHealthy = await checkServerHealth();
-        console.log("🏥 ヘルスチェック結果:", isHealthy);
-
-        if (isHealthy) {
-          console.log("✅ サーバー復旧を確認！次のキーワードから再開します");
-
-          clearInterval(checkInterval);
-          setServerCheckInterval(null);
-          setIsWaitingForServerRecovery(false);
-
-          // Slack通知: サーバー復旧
-          await slackNotifier.notifyStepComplete({
-            keyword: failedKeyword.keyword,
-            step: "server-recovery",
-            h2Count: attempts, // 復旧までの試行回数
-          });
-
-          // 失敗したキーワードをスキップして次から再開
-          const nextIndex = queueIndexRef.current + 1;
-          if (nextIndex < keywordQueueRef.current.length) {
-            const nextKeyword = keywordQueueRef.current[nextIndex];
-            console.log(`⏭️ 次のキーワードから再開: ${nextKeyword.keyword}`);
-
-            setQueueIndex(nextIndex);
-            setQueueProgress({
-              current: nextIndex,
-              total: keywordQueueRef.current.length,
-            });
-            setCurrentSpreadsheetRow(nextKeyword.row);
-
-            // 3秒待ってから再開（サーバー安定化のため）
-            setTimeout(() => {
-              console.log("🔄 サーバー復旧後、次のキーワードで再開します");
-              handleGenerateFullAutoWithRecovery(
-                nextKeyword.keyword,
-                false,
-                true
-              );
-            }, 3000);
-          } else {
-            console.log("🎉 キューの最後まで到達しました");
-            if (cleanupQueueStateRef.current) {
-              cleanupQueueStateRef.current();
+  // SeoOutlineV2をマークダウン文字列に変換するヘルパー
+  const convertOutlineV2ToMarkdown = (outline: any, kw: string): string => {
+    let md = '# ' + (outline.title || kw) + '\n\n';
+    if (outline.outline && Array.isArray(outline.outline)) {
+      outline.outline.forEach(function(section: any) {
+        md += '## ' + section.heading + '\n';
+        md += '文字数目標: ' + (section.characterCount || 1000) + '文字\n';
+        if (section.notes) md += '執筆メモ: ' + section.notes + '\n';
+        if (section.subheadings && Array.isArray(section.subheadings)) {
+          section.subheadings.forEach(function(sub: any) {
+            if (typeof sub === 'string') {
+              md += '### ' + sub + '\n';
+            } else if (sub.text) {
+              md += '### ' + sub.text + '\n';
+              if (sub.note) md += '執筆メモ: ' + sub.note + '\n';
             }
-          }
-
-          return;
-        }
-
-        if (attempts >= maxAttempts) {
-          console.log("❌ サーバー復旧タイムアウト。処理を中断します");
-
-          clearInterval(checkInterval);
-          setServerCheckInterval(null);
-          setIsWaitingForServerRecovery(false);
-
-          // Slack通知: 復旧タイムアウト
-          await slackNotifier.notifyError({
-            keyword: failedKeyword.keyword,
-            step: "server-recovery-timeout",
-            error: `30分間待機しましたがサーバーが復旧しませんでした`,
           });
-
-          // キュー処理を停止
-          if (cleanupQueueStateRef.current) {
-            cleanupQueueStateRef.current();
-          }
         }
-      }, 30000); // 30秒間隔でチェック
-
-      setServerCheckInterval(checkInterval);
-    },
-    [checkServerHealth]
-  );
-
-  // エラーハンドリング強化版のhandleGenerateFullAuto
-  const handleGenerateFullAutoWithRecovery = useCallback(
-    async (
-      newKeyword: string,
-      includeImages: boolean,
-      isQueueRun: boolean = false
-    ) => {
-      console.log("🚀 handleGenerateFullAutoWithRecovery 開始:", {
-        keyword: newKeyword,
-        isQueueRun,
-        queueActive: queueActiveRef.current,
+        md += '\n';
       });
+    }
+    return md;
+  };
 
-      try {
-        await handleGenerateFullAuto(newKeyword, includeImages, isQueueRun);
-        console.log("✅ handleGenerateFullAuto 正常完了");
-      } catch (error) {
-        console.error("❌ 記事生成エラー:", error);
-        console.log("🔍 エラーキャッチ - handleGenerateFullAutoWithRecovery");
+  const handleBatchProcessItem = async (item: BatchQueueItem): Promise<{ title: string; fileName: string }> => {
+    console.log('🌙 バッチ処理開始:', item.keyword);
 
-        // デバッグ情報を出力
-        console.log("🔍 エラーハンドリング デバッグ:");
-        console.log("  - isQueueRun:", isQueueRun);
-        console.log("  - queueActiveRef.current:", queueActiveRef.current);
-        console.log(
-          "  - error.message:",
-          error instanceof Error ? error.message : "Not Error instance"
-        );
-
-        // サーバーエラー（502, 503）の場合は復旧待ち処理を開始
-        const isServerError =
-          error instanceof Error &&
-          (error.message.includes("502") ||
-            error.message.includes("503") ||
-            error.message.includes("fetch") ||
-            error.message.includes("Failed to fetch") ||
-            error.message.includes("TypeError") ||
-            error.message.includes("RENDER_RESTART_REQUIRED") ||
-            error.message.includes("RENDER_SERVER_DOWN") ||
-            error.message.includes("Puppeteerによるページ取得に失敗"));
-
-        console.log("  - isServerError:", isServerError);
-
-        if (isServerError) {
-          if (isQueueRun && queueActiveRef.current) {
-            console.log("🔄 復旧待ち処理を開始します");
-            console.log("🔍 現在のキューインデックス:", queueIndexRef.current);
-            console.log("🔍 キューの長さ:", keywordQueueRef.current.length);
-            console.log("🔍 キューの内容:", keywordQueueRef.current);
-
-            const currentKeyword =
-              keywordQueueRef.current[queueIndexRef.current];
-            console.log("🔍 失敗したキーワード:", currentKeyword);
-
-            if (currentKeyword) {
-              console.log(
-                "✅ キーワードが見つかりました。復旧待ち処理を実行します"
-              );
-              await waitForServerRecovery(currentKeyword, error);
-            } else {
-              console.error("❌ 現在のキーワードが見つかりません！");
-              console.log("🔍 デバッグ情報:", {
-                queueIndex: queueIndexRef.current,
-                queueLength: keywordQueueRef.current.length,
-                queue: keywordQueueRef.current,
-              });
-            }
-          } else {
-            console.log(
-              "⚠️ 復旧待ち処理をスキップ (キューが非アクティブまたは単発実行)"
-            );
-          }
-        } else {
-          // その他のエラーの場合は3分後に次のキーワードへ
-          if (isQueueRun && queueActiveRef.current) {
-            console.log(
-              "⏭️ エラーが発生しましたが、3分後に次のキーワードに進みます"
-            );
-
-            setTimeout(() => {
-              const nextIndex = queueIndexRef.current + 1;
-              if (nextIndex < keywordQueueRef.current.length) {
-                const nextKeyword = keywordQueueRef.current[nextIndex];
-
-                setQueueIndex(nextIndex);
-                setQueueProgress({
-                  current: nextIndex,
-                  total: keywordQueueRef.current.length,
-                });
-                setCurrentSpreadsheetRow(nextKeyword.row);
-
-                console.log(
-                  "⏭️ 3分後の次のキーワード処理（エラーハンドリング付き）"
-                );
-                handleGenerateFullAutoWithRecovery(
-                  nextKeyword.keyword,
-                  false,
-                  true
-                );
-              } else {
-                if (cleanupQueueStateRef.current) {
-                  cleanupQueueStateRef.current();
-                }
-              }
-            }, 180000); // 3分後
-          }
+    // 取引先プロフィールを名前でマッチング
+    let batchClientProfile = null;
+    if (item.clientName) {
+      const matched = clientSummaries.find(function(c) {
+        return c.name === item.clientName || c.name.includes(item.clientName) || item.clientName.includes(c.name);
+      });
+      if (matched) {
+        try {
+          const { fetchClientById } = await import('./services/clientDataService');
+          batchClientProfile = await fetchClientById(matched.id);
+          console.log('✅ バッチ: 取引先プロフィール取得:', batchClientProfile.name);
+        } catch (e) {
+          console.warn('⚠️ バッチ: 取引先プロフィール取得失敗（続行）', e);
         }
       }
-    },
-    [handleGenerateFullAuto, waitForServerRecovery]
-  );
+    }
 
-  // ステップ更新ヘルパー関数
-  const updateAutoStep = (index: number, update: Partial<AutoStep>) => {
-    setAutoSteps((prev) => {
-      const newSteps = [...prev];
-      newSteps[index] = { ...newSteps[index], ...update };
-      return newSteps;
+    // 競合分析
+    const { generateCompetitorResearch: gcr } = await import('./services/competitorResearchWithWebFetch');
+    const research = await gcr(item.keyword, function() {}, true);
+
+    // 構成案生成
+    const { generateOutlineV2: gov2 } = await import('./services/outlineGeneratorV2');
+    const { checkAndFixOutline: cafo } = await import('./services/outlineCheckerV2');
+    const rawOutline = await gov2(item.keyword, research, false, false, undefined, batchClientProfile || undefined);
+    const { finalOutline } = await cafo(rawOutline, item.keyword, research);
+
+    // 構成案を保存
+    const { saveOutline: so, updateSavedArticle: usa } = await import('./services/articleStorageService');
+    const savedId = await so({
+      clientId: batchClientProfile ? (batchClientProfile as any).id || 'none' : 'none',
+      clientName: item.clientName || '未選択',
+      keyword: item.keyword,
+      outline: finalOutline,
     });
-  };
 
-  // フル自動モードのキャンセル
-  const handleCancelAutoMode = () => {
-    setIsAutoRunning(false);
-    setIsFullAutoMode(false);
-    setIsLoading(false);
-    console.log("⛔ フル自動モードをキャンセルしました");
-  };
+    // 記事執筆
+    const outlineMarkdown = convertOutlineV2ToMarkdown(finalOutline, item.keyword);
+    const articleHtml = await generateArticleV3({
+      outline: outlineMarkdown,
+      keyword: item.keyword,
+      targetAudience: finalOutline.targetAudience || 'ビジネスパーソン',
+      tone: 'professional',
+      useGrounding: true,
+      clientProfile: batchClientProfile || undefined,
+      writingStyleSample: buildCombinedStyleText(writingStyleSample),
+    });
 
-  // フル自動モードのリトライ
-  const handleRetryAutoStep = async (stepId: string) => {
-    console.log(`🔄 ステップ ${stepId} をリトライします`);
-    // リトライロジックは個別に実装
-  };
-
-  // キュー後片付け関数はrefベースの実装に移行済み（上記のcleanupQueueStateRefを参照）
-
-  // 次のキーワードをキューから起動する関数
-  const startNextKeywordFromQueue = useCallback(() => {
-    if (!queueActiveRef.current) {
-      console.log(
-        "⏹️ キューが非アクティブのため、次のキーワード処理をスキップ"
-      );
-      return;
-    }
-
-    const nextIndex = queueIndexRef.current + 1;
-    const queue = keywordQueueRef.current;
-
-    if (nextIndex >= queue.length) {
-      console.log("✅ 全キーワードの処理が完了しました");
-      // refを使ってクリーンアップを実行
-      if (cleanupQueueStateRef.current) {
-        cleanupQueueStateRef.current();
-      }
-      return;
-    }
-
-    // Mutex: 起動中フラグをチェック
-    if (isLaunchingRef.current) {
-      console.log("⏳ 既に次のキーワードを起動中です。重複実行を防止します。");
-      return;
-    }
-
-    // Mutex: 起動中フラグを設定
-    isLaunchingRef.current = true;
-
-    try {
-      const nextKeyword = queue[nextIndex];
-      console.log(
-        `\n🔄 記事生成 ${nextIndex + 1}/${queue.length}: ${nextKeyword.keyword}`
-      );
-
-      // 状態更新
-      setQueueIndex(nextIndex);
-      setQueueProgress({ current: nextIndex, total: queue.length });
-      setCurrentSpreadsheetRow(nextKeyword.row);
-      localStorage.setItem("currentSpreadsheetRow", nextKeyword.row.toString());
-
-      // エラーハンドリング強化版を使用
-      handleGenerateFullAutoWithRecovery(nextKeyword.keyword, false, true);
-    } finally {
-      // 500ms後にMutex解除（handleGenerateFullAutoの初期化処理完了を待つ）
-      setTimeout(() => {
-        isLaunchingRef.current = false;
-      }, 500);
-    }
-  }, []); // 依存関係を削除してcircular dependencyを回避
-
-  // キーワードキューを順次処理する関数をrefに保存
-  const processKeywordQueueRef =
-    useRef<(keywords: Array<{ row: number; keyword: string }>) => void>();
-
-  // processKeywordQueue関数を更新
-  useEffect(() => {
-    processKeywordQueueRef.current = (
-      keywords: Array<{ row: number; keyword: string }>
-    ) => {
-      console.log(`📋 キューに${keywords.length}件のキーワードを追加しました`);
-
-      // キュー配列を保存
-      setKeywordQueue(keywords);
-      setQueueProgress({ current: 0, total: keywords.length });
-      setQueueIndex(0);
-      setQueueActive(true);
-      setIsProcessingQueue(true);
-
-      // 最初のキーワードを起動
-      setTimeout(() => {
-        if (keywords.length > 0) {
-          const firstKeyword = keywords[0];
-          console.log(
-            `\n🔄 記事生成 1/${keywords.length}: ${firstKeyword.keyword}`
-          );
-
-          setCurrentSpreadsheetRow(firstKeyword.row);
-          localStorage.setItem(
-            "currentSpreadsheetRow",
-            firstKeyword.row.toString()
-          );
-
-          // エラーハンドリング強化版を使用
-          handleGenerateFullAutoWithRecovery(firstKeyword.keyword, false, true);
-        }
-      }, 0);
+    // 記事を保存
+    const articleData = {
+      title: finalOutline.title || item.keyword,
+      metaDescription: finalOutline.metaDescription || '',
+      htmlContent: articleHtml,
+      plainText: articleHtml.replace(/<[^>]*>/g, ''),
     };
-  });
+    await usa(savedId, { article: articleData });
 
-  // コンポーネントで使用するためのラッパー関数
-  const processKeywordQueue = useCallback(
-    (keywords: Array<{ row: number; keyword: string }>) => {
-      if (processKeywordQueueRef.current) {
-        processKeywordQueueRef.current(keywords);
-      }
-    },
-    []
-  );
-
-  // スプレッドシートモード自動復旧機能付きハンドラー
-  const handleSpreadsheetModeWithRetry = useCallback(
-    async (retryCount: number = 0) => {
-      const maxRetries = 10; // 最大10回リトライ（5分間）
-
-      try {
-        await handleSpreadsheetMode();
-      } catch (err) {
-        console.error(
-          `❌ スプレッドシートモード失敗 (${retryCount + 1}/${maxRetries}):`,
-          err
-        );
-
-        const isServerError =
-          err instanceof Error &&
-          (err.message.includes("502") ||
-            err.message.includes("503") ||
-            err.message.includes("fetch") ||
-            err.message.includes("Failed to fetch"));
-
-        if (isServerError && retryCount < maxRetries) {
-          console.log(
-            `🔄 ${30}秒後に自動リトライ (${retryCount + 1}/${maxRetries})`
-          );
-          setError(
-            `サーバー復旧待ち中... (${retryCount + 1}/${maxRetries}回目)`
-          );
-
-          setTimeout(() => {
-            handleSpreadsheetModeWithRetry(retryCount + 1);
-          }, 30000);
-        } else {
-          setError(
-            "スプレッドシート取得に失敗しました: " + (err as Error).message
-          );
-        }
-      }
-    },
-    []
-  );
-
-  // スプレッドシートモード開始ハンドラー
-  const handleSpreadsheetMode = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const apiKey = import.meta.env.VITE_INTERNAL_API_KEY;
-      const apiUrl =
-        import.meta.env.VITE_API_URL?.replace("/api", "") ||
-        import.meta.env.VITE_BACKEND_URL ||
-        "http://localhost:3001";
-
-      if (!apiKey) {
-        throw new Error(
-          "🔐 環境変数 VITE_INTERNAL_API_KEY が設定されていません"
-        );
-      }
-
-      console.log("📤 スプレッドシートからキーワードを取得中...");
-      const response = await fetch(`${apiUrl}/api/spreadsheet-mode/keywords`, {
-        method: "GET",
-        headers: {
-          "x-api-key": apiKey,
-        },
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-
-        // ADC認証エラーの場合
-        if (
-          response.status === 401 &&
-          errorData.action === "ADC_REAUTH_REQUIRED"
-        ) {
-          throw new Error(
-            `🔐 Google認証が期限切れです\n\nターミナルで以下を実行してください:\n${errorData.command}`
-          );
-        }
-
-        throw new Error(
-          `データ取得エラー: ${response.status} - ${
-            errorData.error || "Unknown error"
-          }`
-        );
-      }
-
-      const data = await response.json();
-
-      if (data.success && data.keywords.length > 0) {
-        console.log(`📊 取得したキーワード数: ${data.count}`);
-
-        // キューに全キーワードをセット（refを使用）
-        if (processKeywordQueueRef.current) {
-          processKeywordQueueRef.current(data.keywords);
-        }
-      } else {
-        setError(data.error || "キーワードが見つかりませんでした");
-      }
-    } catch (err) {
-      console.error("❌ スプレッドシート取得エラー:", err);
-
-      // サーバーエラー（502, 503）の場合は自動復旧を試行
-      const isServerError =
-        err instanceof Error &&
-        (err.message.includes("502") ||
-          err.message.includes("503") ||
-          err.message.includes("fetch") ||
-          err.message.includes("Failed to fetch") ||
-          err.message.includes("TypeError"));
-
-      if (isServerError) {
-        // エラーを再throw（上位のhandleSpreadsheetModeWithRetryで処理）
-        throw err;
-      } else {
-        setError("スプレッドシート取得エラー: " + (err as Error).message);
-      }
-    } finally {
-      setIsLoading(false);
-    }
-  }, []); // 依存関係を削除してcircular dependencyを回避
+    // savedId（UUID）をそのまま返す → BatchMode の fetchSavedArticleById で使用
+    console.log('✅ バッチ処理完了:', item.keyword, '→ id:', savedId);
+    return { title: articleData.title, fileName: savedId };
+  };
 
   // ファクトチェックページを表示
   if (currentPage === "factcheck") {
@@ -1409,19 +725,6 @@ const App: React.FC = () => {
             競合サイトを分析し、検索上位を狙える記事構成案をAIが作成します
           </p>
         </div>
-        {/* ツールボタン */}
-        <div className="flex gap-2 sm:gap-3 justify-center flex-wrap">
-          <button
-            onClick={() => handleSpreadsheetModeWithRetry()}
-            disabled={isLoading || isProcessingQueue}
-            className="px-4 py-2 bg-blue-500 text-white hover:bg-blue-600 rounded-lg transition-all duration-200 text-sm font-medium shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            スプレッドシートモード
-            {isProcessingQueue &&
-              queueProgress &&
-              ` (${queueProgress.current}/${queueProgress.total})`}
-          </button>
-        </div>
       </header>
 
       <main className="w-full max-w-5xl flex-grow">
@@ -1429,136 +732,109 @@ const App: React.FC = () => {
           <KeywordInputForm
             onGenerate={handleGenerate}
             onGenerateV2={handleGenerateV2}
-            onGenerateFullAuto={handleGenerateFullAuto}
-            onBatchProcess={processKeywordQueue}
             isLoading={isLoading}
             apiUsageToday={getApiUsageToday()}
             apiUsageWarning={apiUsageWarning}
             onOpenImageAgent={openImageAgentInIframe}
           />
 
+          {/* 取引先選択（常時表示） */}
+          <div className="mt-4 flex items-center gap-3 p-3 bg-blue-50 rounded-lg border border-blue-100">
+            <span className="text-sm font-medium text-blue-700 shrink-0">🏢 取引先：</span>
+            {clientSummaries.length > 0 ? (
+              <select
+                value={selectedClientId}
+                onChange={function(e) { handleClientSelect(e.target.value); }}
+                className="flex-1 border border-blue-200 rounded px-3 py-1.5 text-sm bg-white text-gray-700"
+              >
+                <option value="">（取引先なし）</option>
+                {clientSummaries.map(function(c) {
+                  return (
+                    <option key={c.id} value={c.id}>{c.name}{c.industry ? ' ／ ' + c.industry : ''}</option>
+                  );
+                })}
+              </select>
+            ) : (
+              <span className="text-sm text-gray-400 flex-1">取引先が登録されていません</span>
+            )}
+            {clientProfile && (
+              <span className="text-xs text-blue-600 shrink-0">✅ ルール適用中</span>
+            )}
+            <button
+              onClick={function() { setActiveTab("clients"); }}
+              className="text-xs px-3 py-1.5 bg-green-500 text-white rounded hover:bg-green-600 shrink-0"
+            >
+              取引先管理
+            </button>
+          </div>
+
+          {/* 構成案モード選択 */}
+          <div className="mt-3 flex items-center gap-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+            <span className="text-sm font-medium text-gray-600 shrink-0">📋 構成モード：</span>
+            <div className="flex gap-2 flex-wrap">
+              {/* 標準モード（競合分析型）は一時的に非表示 — コードは保持
+              <button
+                onClick={function() { setOutlineMode('standard'); }}
+                className={
+                  'px-3 py-1.5 rounded-lg text-sm font-medium border transition-all ' +
+                  (outlineMode === 'standard'
+                    ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                    : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-100')
+                }
+              >
+                標準モード（競合分析型）
+              </button>
+              */}
+              <button
+                onClick={function() { setOutlineMode('siteData'); }}
+                className={
+                  'px-3 py-1.5 rounded-lg text-sm font-medium border transition-all ' +
+                  (outlineMode === 'siteData'
+                    ? 'bg-emerald-600 text-white border-emerald-600 shadow-sm'
+                    : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-100')
+                }
+              >
+                サイトデータ型（事実ベース）
+              </button>
+            </div>
+            <span className="text-xs text-gray-400 ml-auto shrink-0">
+              {outlineMode === 'standard'
+                ? '競合H2/H3分析・文字数制御'
+                : '取引先情報基点・ハルシネーション抑制'}
+            </span>
+          </div>
+
+          {/* 取引先管理画面（常時アクセス可能） */}
+          {activeTab === "clients" && (
+            <div className="mt-6">
+              <ClientManager
+                onClientListChanged={function() {
+                  fetchClients()
+                    .then(function(list) {
+                      setClientSummaries(list.filter(function(c) { return c.isActive; }));
+                    })
+                    .catch(function() {});
+                }}
+              />
+            </div>
+          )}
+
+          {/* 執筆スタイルサンプル管理（常時アクセス可能） */}
+          {activeTab === "writingStyle" && (
+            <div className="mt-6">
+              <WritingStyleManager
+                clientSummaries={clientSummaries}
+                selectedClientId={selectedClientId}
+                onStyleSaved={function(sample) {
+                  setWritingStyleSample(sample);
+                }}
+              />
+            </div>
+          )}
+
           <div className="mt-8">
-            {/* フル自動モード進捗表示 */}
-            {isFullAutoMode && autoSteps.length > 0 && (
-              <div className="mb-6">
-                <AutoProgressDisplay
-                  steps={autoSteps}
-                  currentStep={currentAutoStep}
-                  isRunning={isAutoRunning}
-                  onRetry={handleRetryAutoStep}
-                  onCancel={handleCancelAutoMode}
-                />
-              </div>
-            )}
 
-            {/* スプレッドシートモード進捗表示 */}
-            {isProcessingQueue && queueProgress && (
-              <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-blue-700 font-semibold">
-                    {isWaitingForServerRecovery
-                      ? "サーバー復旧待機中"
-                      : "スプレッドシートモード実行中"}
-                  </h3>
-                  <span className="text-blue-600 text-sm">
-                    {queueProgress.current}/{queueProgress.total} 完了
-                  </span>
-                </div>
-                <div className="w-full bg-gray-200 rounded-full h-2 mb-2">
-                  <div
-                    className={`h-2 rounded-full transition-all duration-300 ${
-                      isWaitingForServerRecovery
-                        ? "bg-amber-500"
-                        : "bg-blue-500"
-                    }`}
-                    style={{
-                      width: `${
-                        (queueProgress.current / queueProgress.total) * 100
-                      }%`,
-                    }}
-                  ></div>
-                </div>
-                {isWaitingForServerRecovery ? (
-                  <div className="space-y-2">
-                    <p className="text-amber-600 text-sm">
-                      サーバーがダウンしました。復旧を待機中...
-                    </p>
-                    <p className="text-gray-500 text-xs">
-                      復旧チェック: {recoveryAttempts}/60 回 (30秒間隔)
-                    </p>
-                    {lastFailedKeyword && (
-                      <p className="text-gray-500 text-xs">
-                        中断したキーワード: {lastFailedKeyword.keyword}
-                      </p>
-                    )}
-                  </div>
-                ) : currentSpreadsheetRow ? (
-                  <p className="text-gray-600 text-sm">
-                    現在処理中: 行{currentSpreadsheetRow} - {keyword}
-                  </p>
-                ) : null}
-
-                {/* キャンセル・復旧待ちスキップボタン */}
-                <div className="mt-3 flex gap-2">
-                  <button
-                    onClick={() => {
-                      if (cleanupQueueStateRef.current) {
-                        cleanupQueueStateRef.current();
-                      }
-                    }}
-                    className="px-3 py-1 bg-red-500 hover:bg-red-600 text-white text-sm rounded transition-all duration-200"
-                  >
-                    キュー停止
-                  </button>
-
-                  {isWaitingForServerRecovery && (
-                    <button
-                      onClick={async () => {
-                        console.log(
-                          "⏭️ サーバー復旧待ちをスキップして次のキーワードへ"
-                        );
-
-                        // 復旧待ちを停止
-                        if (serverCheckInterval) {
-                          clearInterval(serverCheckInterval);
-                          setServerCheckInterval(null);
-                        }
-                        setIsWaitingForServerRecovery(false);
-
-                        // 次のキーワードへ進む
-                        const nextIndex = queueIndexRef.current + 1;
-                        if (nextIndex < keywordQueueRef.current.length) {
-                          const nextKeyword =
-                            keywordQueueRef.current[nextIndex];
-
-                          setQueueIndex(nextIndex);
-                          setQueueProgress({
-                            current: nextIndex,
-                            total: keywordQueueRef.current.length,
-                          });
-                          setCurrentSpreadsheetRow(nextKeyword.row);
-
-                          handleGenerateFullAutoWithRecovery(
-                            nextKeyword.keyword,
-                            false,
-                            true
-                          );
-                        } else {
-                          if (cleanupQueueStateRef.current) {
-                            cleanupQueueStateRef.current();
-                          }
-                        }
-                      }}
-                      className="px-3 py-1 bg-yellow-600 hover:bg-yellow-700 text-white text-sm rounded transition-all duration-200"
-                    >
-                      ⏭️ 復旧待ちスキップ
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {isLoading && !isFullAutoMode && (
+            {isLoading && (
               <div>
                 <LoadingSpinner />
                 {analysisProgress && (
@@ -1595,8 +871,20 @@ const App: React.FC = () => {
             {error && <ErrorMessage message={error} />}
 
             {/* タブ切り替え */}
-            {(outline || outlineV2 || competitorResearch) && !isLoading && (
-              <div className="flex gap-2 mb-6">
+            {!isLoading && (
+              <div className="flex gap-2 mb-6 flex-wrap">
+                {/* 記事一覧は常時表示 */}
+                <button
+                  onClick={() => setActiveTab("articleList")}
+                  className={`px-6 py-3 rounded-xl font-semibold transition-all duration-200 ${
+                    activeTab === "articleList"
+                      ? "bg-blue-500 text-white shadow-md"
+                      : "bg-white text-gray-600 hover:bg-gray-50 border border-gray-200"
+                  }`}
+                >
+                  📚 記事一覧
+                </button>
+                {(outline || outlineV2 || competitorResearch) && (
                 <button
                   onClick={() => setActiveTab("research")}
                   className={`px-6 py-3 rounded-xl font-semibold transition-all duration-200 ${
@@ -1605,8 +893,9 @@ const App: React.FC = () => {
                       : "bg-white text-gray-600 hover:bg-gray-50 border border-gray-200"
                   }`}
                 >
-                  記事一覧
+                  競合分析
                 </button>
+                )}
                 {competitorResearch?.frequencyWords && (
                   <button
                     onClick={() => setActiveTab("frequency")}
@@ -1619,27 +908,31 @@ const App: React.FC = () => {
                     頻出単語
                   </button>
                 )}
-                <button
-                  onClick={() => setActiveTab("outline")}
-                  className={`px-6 py-3 rounded-xl font-semibold transition-all duration-200 ${
-                    activeTab === "outline"
-                      ? "bg-blue-500 text-white shadow-md"
-                      : "bg-white text-gray-600 hover:bg-gray-50 border border-gray-200"
-                  }`}
-                >
-                  構成案
-                </button>
-                {generatedArticle && (
-                  <button
-                    onClick={() => setActiveTab("article")}
-                    className={`px-6 py-3 rounded-xl font-semibold transition-all duration-200 ${
-                      activeTab === "article"
-                        ? "bg-gradient-to-r from-indigo-500 to-purple-500 text-white shadow-md"
-                        : "bg-white text-gray-600 hover:bg-gray-50 border border-gray-200"
-                    }`}
-                  >
-                    記事本文
-                  </button>
+                {(outline || outlineV2 || competitorResearch) && (
+                  <>
+                    <button
+                      onClick={() => setActiveTab("outline")}
+                      className={`px-6 py-3 rounded-xl font-semibold transition-all duration-200 ${
+                        activeTab === "outline"
+                          ? "bg-blue-500 text-white shadow-md"
+                          : "bg-white text-gray-600 hover:bg-gray-50 border border-gray-200"
+                      }`}
+                    >
+                      構成案
+                    </button>
+                    {generatedArticle && (
+                      <button
+                        onClick={() => setActiveTab("article")}
+                        className={`px-6 py-3 rounded-xl font-semibold transition-all duration-200 ${
+                          activeTab === "article"
+                            ? "bg-gradient-to-r from-indigo-500 to-purple-500 text-white shadow-md"
+                            : "bg-white text-gray-600 hover:bg-gray-50 border border-gray-200"
+                        }`}
+                      >
+                        記事本文
+                      </button>
+                    )}
+                  </>
                 )}
                 <button
                   onClick={() => setActiveTab("references")}
@@ -1655,6 +948,61 @@ const App: React.FC = () => {
                       {selectedRefMaterialIds.length}
                     </span>
                   )}
+                </button>
+                <button
+                  onClick={() => setActiveTab("clients")}
+                  className={`px-6 py-3 rounded-xl font-semibold transition-all duration-200 ${
+                    activeTab === "clients"
+                      ? "bg-green-500 text-white shadow-md"
+                      : "bg-white text-gray-600 hover:bg-gray-50 border border-gray-200"
+                  }`}
+                >
+                  🏢 取引先管理
+                </button>
+                <button
+                  onClick={() => setActiveTab("writingStyle")}
+                  className={`px-6 py-3 rounded-xl font-semibold transition-all duration-200 ${
+                    activeTab === "writingStyle"
+                      ? "bg-purple-500 text-white shadow-md"
+                      : "bg-white text-gray-600 hover:bg-gray-50 border border-gray-200"
+                  }`}
+                >
+                  ✍️ 執筆スタイル
+                  {writingStyleSample && (
+                    <span className="ml-1 px-1.5 py-0.5 text-xs bg-purple-600 text-white rounded-full">
+                      ✅
+                    </span>
+                  )}
+                </button>
+                <button
+                  onClick={() => setActiveTab("batch")}
+                  className={`px-6 py-3 rounded-xl font-semibold transition-all duration-200 ${
+                    activeTab === "batch"
+                      ? "bg-indigo-500 text-white shadow-md"
+                      : "bg-white text-gray-600 hover:bg-gray-50 border border-gray-200"
+                  }`}
+                >
+                  📋 一斉作成
+                </button>
+                <button
+                  onClick={() => setActiveTab("keywordManager")}
+                  className={`px-6 py-3 rounded-xl font-semibold transition-all duration-200 ${
+                    activeTab === "keywordManager"
+                      ? "bg-emerald-500 text-white shadow-md"
+                      : "bg-white text-gray-600 hover:bg-gray-50 border border-gray-200"
+                  }`}
+                >
+                  📊 キーワード管理
+                </button>
+                <button
+                  onClick={() => setActiveTab("revisionLog")}
+                  className={`px-6 py-3 rounded-xl font-semibold transition-all duration-200 ${
+                    activeTab === "revisionLog"
+                      ? "bg-slate-600 text-white shadow-md"
+                      : "bg-white text-gray-600 hover:bg-gray-50 border border-gray-200"
+                  }`}
+                >
+                  📋 修正ログ
                 </button>
               </div>
             )}
@@ -1690,19 +1038,27 @@ const App: React.FC = () => {
                   <OutlineDisplayV2
                     outline={outlineV2}
                     keyword={keyword}
-                    onStartWritingV1={() => {
-                      setWritingMode("v1");
-                      setShowArticleWriter(true);
-                    }}
-                    // Ver.2ボタンは非表示
-                    // onStartWriting={() => {
-                    //   setWritingMode('v2');
-                    //   setShowArticleWriter(true);
-                    // }}
-                    onStartWritingV3={() => {
+                    outlineMode={outlineMode}
+                    onStartWritingV3={async () => {
+                      // 構成案を自動保存してから執筆開始
+                      if (!isOutlineSaved && outlineV2) {
+                        try {
+                          await handleSaveOutline();
+                        } catch (e) {
+                          console.warn('構成案の自動保存に失敗しました（続行）', e);
+                        }
+                      }
                       setWritingMode("v3");
                       setShowArticleWriter(true);
                     }}
+                    onRevise={async (instruction: string) => {
+                      const revised = await reviseOutlineV2(outlineV2, keyword, instruction);
+                      setOutlineV2(revised);
+                      // 修正後は保存済み状態をリセット（再保存を促す）
+                      setIsOutlineSaved(false);
+                    }}
+                    onSave={handleSaveOutline}
+                    isSaved={isOutlineSaved}
                   />
                 )}
 
@@ -1745,7 +1101,44 @@ const App: React.FC = () => {
                   }
                 }}
                 onOpenImageAgent={openImageAgentInIframe}
+                onArticleUpdate={(html) => {
+                  setGeneratedArticle({
+                    title: generatedArticle.title,
+                    metaDescription: generatedArticle.metaDescription,
+                    htmlContent: html,
+                    plainText: generatedArticle.plainText,
+                  });
+                  // 内容更新時は保存済み状態をリセット
+                  setIsArticleSaved(false);
+                }}
+                onSave={handleSaveArticle}
+                isSaved={isArticleSaved}
+                onExportForCheck={handleExportForCheck}
+                onImportChecked={handleImportChecked}
               />
+            )}
+
+            {activeTab === "articleList" && (
+              <ArticleList
+                clientSummaries={clientSummaries}
+                onRestoreOutline={handleRestoreOutline}
+                onRestoreArticle={handleRestoreArticle}
+              />
+            )}
+
+            {activeTab === "batch" && (
+              <BatchMode onProcessItem={handleBatchProcessItem} />
+            )}
+
+            {activeTab === "keywordManager" && (
+              <KeywordManager
+                onOutlineLoaded={handleOutlineLoadedFromSheet}
+                clientProfile={clientProfile}
+              />
+            )}
+
+            {activeTab === "revisionLog" && (
+              <RevisionLogTab />
             )}
 
             {!isLoading && !error && !outline && !competitorResearch && !outlineV2 && activeTab !== "references" && (
@@ -1785,98 +1178,25 @@ const App: React.FC = () => {
             writingMode={writingMode}
             testMode={false} // テストモード強制無効化
             revisionTestMode={false} // 修正サービステストモード無効化
-            isAutoMode={autoArticleWriter} // フル自動モードフラグ
+            isAutoMode={false}
             skipAutoGenerate={showArticleWriter && generatedArticle !== null} // 編集再開時は自動生成をスキップ
             referenceMaterialContext={refMaterialContext || undefined}
+            clientProfile={clientProfile || undefined}
+            writingStyleSample={buildCombinedStyleText(writingStyleSample)}
             onOpenImageAgent={openImageAgentInIframe}
             onClose={() => {
               setShowArticleWriter(false);
               setShowWriterDirectly(false);
-              setAutoArticleWriter(false);
             }}
             onArticleGenerated={(article) => {
               setGeneratedArticle(article);
               setActiveTab("article");
-
-              // フル自動モードの場合、Step 4（記事執筆）の完了を記録
-              if (isFullAutoMode && autoArticleWriter) {
-                updateAutoStep(3, {
-                  status: "completed",
-                  result: `✅ 記事執筆完了（Ver.3）`,
-                });
-                // Step 5（最終校閲）を開始
-                updateAutoStep(4, { status: "running" });
-                console.log("🚀 フル自動モード: Step 5 - 最終校閲開始");
-              }
-
-              // 最終校閲テストモードの場合はArticleWriterを開いたままにする
-              // （最終校閲ボタンを押せるようにするため）
-              if (showWriterDirectly) {
-                console.log(
-                  "🧪 最終校閲テストモード: ArticleWriterを開いたままにします"
-                );
-                // ArticleWriterを閉じない
-                // setShowArticleWriter(false);
-                // setShowWriterDirectly(false);
-              }
             }}
             onAutoRevisionStart={() => {
-              // Step 6（自動修正）開始
-              updateAutoStep(5, { status: "running" });
-              console.log("🚀 フル自動モード: Step 6 - 自動修正開始");
+              console.log("🚀 自動修正開始");
             }}
             onAutoComplete={async () => {
-              // フル自動モードの全工程完了時の処理
-              console.log("✅ フル自動モード: 全工程完了（自動修正含む）");
-
-              // Step 5（最終校閲）の完了を記録
-              updateAutoStep(4, {
-                status: "completed",
-                result: `✅ 最終校閲完了（マルチエージェント10個使用）`,
-              });
-
-              // Step 6（自動修正）の完了を記録
-              updateAutoStep(5, {
-                status: "completed",
-                result: `✅ 自動修正完了（1回実行）`,
-              });
-
-              // Step 7: 画像生成エージェントはArticleWriter内のstartImageGenerationで起動済み
-              // （startImageGeneration内でslug生成とonOpenImageAgent呼び出しが行われる）
-              updateAutoStep(6, {
-                status: "completed",
-                result: "✅ 画像生成エージェント起動完了（iframe）",
-              });
-
-              // 最終的な記事情報を取得
-              const finalArticle = generatedArticle;
-              const charCount = finalArticle?.plainText?.length || 0;
-              const h2Count = outlineV2?.sections?.length || 0;
-              const h3Count =
-                outlineV2?.sections?.reduce(
-                  (sum, section) => sum + (section.subheadings?.length || 0),
-                  0
-                ) || 0;
-
-              // Slack通知: 完了
-              await slackNotifier.notifyComplete({
-                keyword: keyword,
-                charCount: charCount,
-                h2Count: h2Count,
-                h3Count: h3Count,
-                score: 85, // マルチエージェントのスコアを使用する場合は更新
-                url: window.location.href,
-              });
-
-              // 自動実行フラグをリセット
-              setIsAutoRunning(false);
-              setAutoArticleWriter(false);
-              setIsFullAutoMode(false); // Keep-alive停止
-
-              // ArticleWriterは開いたままにして、結果を確認できるようにする
-              console.log(
-                "🎉 フル自動実行が完了しました！画像生成エージェントが自動起動されました。"
-              );
+              console.log("✅ 全工程完了（自動修正含む）");
             }}
           />
         )}

@@ -1,7 +1,7 @@
 // 構成チェックエージェント Ver.2
 // 生成された構成案の品質チェックと自動修正
 
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenAI } from "@google/genai";
 // latestAIModelsは汎用化のため削除
 import type { 
   SeoOutlineV2, 
@@ -93,7 +93,7 @@ const apiKey = import.meta.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY
 if (!apiKey) {
     throw new Error("GEMINI_API_KEY not set.");
 }
-const genAI = new GoogleGenerativeAI(apiKey);
+const genAI = new GoogleGenAI({ apiKey });
 
 // 構成案のチェック
 export function checkOutline(
@@ -574,18 +574,17 @@ ${h3Shortage ? `
     const temperature = attemptNumber === 0 ? 0.4 : 0.2;
     const topP = attemptNumber === 0 ? 0.95 : 0.85;
     
-    const model = genAI.getGenerativeModel({
-      model: "gemini-2.5-pro",
-      generationConfig: {
+    const result = await genAI.models.generateContent({
+      model: "gemini-3.1-pro-preview",
+      contents: fixPrompt,
+      config: {
         temperature, // 修正回数に応じて正確性を高める
         topP,        // 修正回数に応じて確実性を高める
         maxOutputTokens: 16000, // 大きな構成にも対応
         responseMimeType: "application/json"
       }
     });
-
-    const result = await model.generateContent(fixPrompt);
-    let responseText = result.response.text();
+    let responseText = result.text || '';
     
     // JSONの前後の不要な文字を削除
     responseText = responseText.replace(/^```json\s*/i, '').replace(/\s*```$/i, '');

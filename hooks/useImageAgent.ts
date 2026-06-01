@@ -221,7 +221,8 @@ export function useImageAgent(options: UseImageAgentOptions = {}): UseImageAgent
     };
 
     console.log("📤 iframeに記事データを送信中...", messageData);
-    contentWindow.postMessage(messageData, embedState.url);
+    // localhost間の通信のため '*' を使用（特定オリジン指定だと iframe 初期化タイミングで null になる場合がある）
+    contentWindow.postMessage(messageData, "*");
     console.log("✅ iframeへのデータ送信完了！");
 
     setEmbedState((prev) =>

@@ -1,56 +1,30 @@
 import React, { useState } from "react";
 import { SearchIcon } from "./icons";
-import { SpreadsheetModeToggle } from "./SpreadsheetModeToggle";
-import { SpreadsheetDataViewer } from "./SpreadsheetDataViewer";
-
-interface SpreadsheetKeyword {
-  row: number;
-  keyword: string;
-  status?: string;
-  lastUpdated?: string;
-}
 
 interface KeywordInputFormProps {
   onGenerate: (keyword: string, includeImages: boolean) => void;
   onGenerateV2?: (keyword: string, includeImages: boolean) => void;
-  onGenerateFullAuto?: (keyword: string, includeImages: boolean) => void; // フル自動モード用
-  onBatchProcess?: (keywords: SpreadsheetKeyword[]) => void; // 一括処理用
   isLoading: boolean;
   apiUsageToday?: number;
   apiUsageWarning?: string | null;
-  apiBaseUrl?: string; // スプレッドシートAPI用
   onOpenImageAgent?: (articleData: {
     title: string;
     content: string;
     keyword: string;
     autoMode?: boolean;
-  }) => void; // 画像生成エージェントをiframeで開く
+  }) => void;
 }
 
 const KeywordInputForm: React.FC<KeywordInputFormProps> = ({
   onGenerate,
   onGenerateV2,
-  onGenerateFullAuto,
-  onBatchProcess,
   isLoading,
   apiUsageToday = 0,
   apiUsageWarning,
-  apiBaseUrl = import.meta.env.VITE_API_URL?.replace("/api", "") ||
-    import.meta.env.VITE_BACKEND_URL ||
-    "http://localhost:3001",
   onOpenImageAgent,
 }) => {
-  // デバッグ用ログ
-  console.log("🔍 KeywordInputForm Debug:");
-  console.log("  VITE_API_URL:", import.meta.env.VITE_API_URL);
-  console.log("  apiBaseUrl prop:", apiBaseUrl);
-  console.log("  Final apiBaseUrl:", apiBaseUrl);
-
   const [keyword, setKeyword] = useState("");
   const [includeImages, setIncludeImages] = useState(true);
-  const [isFullAutoMode, setIsFullAutoMode] = useState(false); // フル自動モードの状態
-  const [isSpreadsheetMode, setIsSpreadsheetMode] = useState(false); // スプレッドシートモード
-  const [selectedRow, setSelectedRow] = useState<number | null>(null);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -59,107 +33,13 @@ const KeywordInputForm: React.FC<KeywordInputFormProps> = ({
 
   const handleSubmitV2 = (e: React.FormEvent) => {
     e.preventDefault();
-    if (isFullAutoMode && onGenerateFullAuto) {
-      // フル自動モードで実行
-      onGenerateFullAuto(keyword, includeImages);
-    } else if (onGenerateV2) {
-      // 通常のVer.2実行
+    if (onGenerateV2) {
       onGenerateV2(keyword, includeImages);
-    }
-  };
-
-  const handleSpreadsheetModeChange = (enabled: boolean) => {
-    setIsSpreadsheetMode(enabled);
-    if (!enabled) {
-      setSelectedRow(null);
-    }
-  };
-
-  const handleSpreadsheetDataSelect = (data: {
-    keyword: string;
-    row: number;
-  }) => {
-    setKeyword(data.keyword);
-    setSelectedRow(data.row);
-  };
-
-  const handleBatchProcess = (keywords: SpreadsheetKeyword[]) => {
-    if (onBatchProcess) {
-      onBatchProcess(keywords);
     }
   };
 
   return (
     <div className="space-y-4">
-      {/* スプレッドシートモードのトグル */}
-      <SpreadsheetModeToggle
-        onModeChange={handleSpreadsheetModeChange}
-        disabled={isLoading}
-      />
-
-      {/* スプレッドシートデータビューア */}
-      {isSpreadsheetMode && (
-        <SpreadsheetDataViewer
-          onDataSelect={handleSpreadsheetDataSelect}
-          onBatchProcess={onBatchProcess ? handleBatchProcess : undefined}
-          apiBaseUrl={apiBaseUrl}
-        />
-      )}
-
-      {/* フル自動モードのトグル */}
-      <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <label
-              htmlFor="fullAutoMode"
-              className="flex items-center cursor-pointer"
-            >
-              <input
-                id="fullAutoMode"
-                type="checkbox"
-                checked={isFullAutoMode}
-                onChange={(e) => setIsFullAutoMode(e.target.checked)}
-                disabled={isLoading}
-                className="w-5 h-5 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 focus:ring-2"
-              />
-              <div className="ml-3">
-                <span className="text-gray-800 font-semibold">
-                  フル自動モード
-                </span>
-                <span className="ml-2 text-xs bg-gradient-to-r from-blue-500 to-indigo-500 text-white px-2 py-1 rounded-full">
-                  NEW
-                </span>
-              </div>
-            </label>
-          </div>
-          <div className="text-gray-500 text-sm">
-            {isFullAutoMode ? (
-              <span className="text-blue-600">
-                構成生成 → 執筆 → 最終校閲まで全自動実行
-              </span>
-            ) : (
-              <span>従来通り各工程を手動で実行</span>
-            )}
-          </div>
-        </div>
-        {isFullAutoMode && (
-          <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-            <p className="text-sm text-blue-700">
-              <strong>フル自動モードでは以下の処理を連続実行します：</strong>
-            </p>
-            <ol className="mt-2 text-xs text-gray-600 space-y-1 list-decimal list-inside">
-              <li>競合サイト分析（15サイト）</li>
-              <li>構成案生成（Ver.2）＋ 構成チェック</li>
-              <li>記事執筆（Ver.3 Gemini Pro + Grounding）</li>
-              <li>最終校閲（マルチエージェント10個）</li>
-            </ol>
-            <p className="mt-2 text-xs text-amber-600">
-              全工程完了まで約3-5分かかります
-            </p>
-          </div>
-        )}
-      </div>
-
       {/* キーワード入力フォーム */}
       <form
         onSubmit={handleSubmitV2}
@@ -192,11 +72,7 @@ const KeywordInputForm: React.FC<KeywordInputFormProps> = ({
           <button
             type="submit"
             disabled={isLoading}
-            className={`w-full sm:w-auto flex items-center justify-center px-6 py-3.5 font-bold rounded-xl focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-white transition-all duration-200 ease-in-out disabled:bg-gray-300 disabled:cursor-not-allowed transform hover:scale-105 disabled:scale-100 shadow-md whitespace-nowrap ${
-              isFullAutoMode
-                ? "bg-gradient-to-r from-blue-500 via-indigo-500 to-purple-500 text-white hover:from-blue-600 hover:via-indigo-600 hover:to-purple-600 focus:ring-blue-500"
-                : "bg-gradient-to-r from-blue-500 to-blue-600 text-white hover:from-blue-600 hover:to-blue-700 focus:ring-blue-500"
-            }`}
+            className="w-full sm:w-auto flex items-center justify-center px-6 py-3.5 font-bold rounded-xl focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-white transition-all duration-200 ease-in-out disabled:bg-gray-300 disabled:cursor-not-allowed transform hover:scale-105 disabled:scale-100 shadow-md whitespace-nowrap bg-gradient-to-r from-blue-500 to-blue-600 text-white hover:from-blue-600 hover:to-blue-700 focus:ring-blue-500"
           >
             {isLoading ? (
               <>
@@ -220,10 +96,10 @@ const KeywordInputForm: React.FC<KeywordInputFormProps> = ({
                     d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
                   ></path>
                 </svg>
-                {isFullAutoMode ? "自動実行中..." : "分析中..."}
+                分析中...
               </>
             ) : (
-              <>{isFullAutoMode ? "フル自動で開始" : "構成"}</>
+              <>構成</>
             )}
           </button>
         )}

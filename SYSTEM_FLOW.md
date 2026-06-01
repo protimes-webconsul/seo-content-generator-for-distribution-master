@@ -338,7 +338,7 @@ FinalArticle {
 ### インフラ
 - **ポート構成**:
   - 5176: Viteデベロップメントサーバー
-  - 3001: Expressサーバー
+  - 3010: Expressサーバー
   - 3002: Puppeteerサーバー
 
 ---

@@ -12,7 +12,7 @@
 - [ ] `.env`ファイルがGitにコミットされていないことを確認した
 - [ ] `NODE_ENV=production`を設定した
 - [ ] HTTPS通信が有効になっている
-- [ ] ファイアウォールで3001ポートへのアクセスを制限した
+- [ ] ファイアウォールで3010ポートへのアクセスを制限した
 
 ## 📋 セットアップ手順
 
@@ -97,7 +97,7 @@ server {
 
     # APIサーバーへのプロキシ
     location /api/ {
-        proxy_pass http://localhost:3001;
+        proxy_pass http://localhost:3010;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection 'upgrade';
@@ -115,8 +115,8 @@ server {
 ### 1. ファイアウォール設定
 
 ```bash
-# ポート3001への外部アクセスをブロック
-sudo ufw deny 3001
+# ポート3010への外部アクセスをブロック
+sudo ufw deny 3010
 
 # HTTPSのみ許可
 sudo ufw allow 443/tcp
@@ -162,7 +162,7 @@ pm2 install pm2-logrotate
 各サービスファイル（`slackNotificationService.ts`等）で以下のように修正：
 
 ```typescript
-const response = await fetch('http://localhost:3001/api/slack-notify', {
+const response = await fetch('http://localhost:3010/api/slack-notify', {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import type { SeoOutlineV2 } from '../types';
+import type { SeoOutlineV2, OutlineMode } from '../types';
 import { countCharacters } from '../utils/characterCounter';
 import {
   TitleIcon,
@@ -16,9 +16,12 @@ import {
 interface OutlineDisplayV2Props {
   outline: SeoOutlineV2;
   keyword: string;
+  outlineMode?: OutlineMode; // 構成案生成モード
   onStartWriting?: () => void; // Ver.2執筆
-  onStartWritingV1?: () => void; // Ver.1執筆
   onStartWritingV3?: () => void; // Ver.3執筆（Gemini Pro + Grounding）
+  onRevise?: (instruction: string) => Promise<void>; // AI修正
+  onSave?: () => Promise<void>; // 構成案を保存
+  isSaved?: boolean; // 保存済みかどうか
 }
 
 const Card: React.FC<{ icon: React.ReactNode; title: string; children: React.ReactNode }> = ({ icon, title, children }) => (
@@ -35,8 +38,117 @@ const Card: React.FC<{ icon: React.ReactNode; title: string; children: React.Rea
   </div>
 );
 
-const OutlineDisplayV2: React.FC<OutlineDisplayV2Props> = ({ outline, keyword, onStartWriting, onStartWritingV1, onStartWritingV3 }) => {
+const OutlineDisplayV2: React.FC<OutlineDisplayV2Props> = ({ outline, keyword, outlineMode, onStartWriting, onStartWritingV3, onRevise, onSave, isSaved }) => {
   const [copyButtonText, setCopyButtonText] = useState('Markdownコピー');
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveMessage, setSaveMessage] = useState('');
+
+  const handleSave = async () => {
+    if (!onSave) return;
+    setIsSaving(true);
+    setSaveMessage('');
+    try {
+      await onSave();
+      setSaveMessage('saved');
+    } catch (err) {
+      setSaveMessage('error');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+  // 構成案をHTMLに変換（レビュー依頼用）
+  const buildOutlineHtml = () => {
+    let html = '<h1>' + outline.title + '</h1>\n';
+    html += '<p><strong>メタディスクリプション：</strong>' + outline.metaDescription + '</p>\n';
+    html += '<p><strong>ターゲット読者：</strong>' + outline.targetAudience + '</p>\n';
+    html += '<p><strong>検索意図：</strong>' + outline.searchIntent.primary;
+    if (outline.searchIntent.secondary) {
+      html += ' / ' + outline.searchIntent.secondary;
+    }
+    html += '</p>\n<hr>\n';
+
+    for (let i = 0; i < outline.outline.length; i++) {
+      const section = outline.outline[i];
+      html += '<h2>' + section.heading + '</h2>\n';
+      if (section.writingNote) {
+        html += '<p><em>執筆メモ：' + section.writingNote + '</em></p>\n';
+      }
+      if (section.subheadings && section.subheadings.length > 0) {
+        html += '<ul>\n';
+        for (let j = 0; j < section.subheadings.length; j++) {
+          const sub = section.subheadings[j];
+          const subText = typeof sub === 'string' ? sub : sub.text;
+          const subNote = typeof sub === 'string' ? '' : (sub.writingNote || '');
+          html += '<li><strong>' + subText + '</strong>';
+          if (subNote) {
+            html += '（' + subNote + '）';
+          }
+          html += '</li>\n';
+        }
+        html += '</ul>\n';
+      }
+    }
+
+    html += '<hr>\n<h2>まとめ</h2>\n<p>' + outline.conclusion + '</p>\n';
+    return html;
+  };
+
+  // 全体AI修正パネルの状態
+  const [globalInstruction, setGlobalInstruction] = useState('');
+  const [isGlobalRevising, setIsGlobalRevising] = useState(false);
+  const [globalRevisionError, setGlobalRevisionError] = useState('');
+
+  // セクション別修正パネルの状態
+  const [openRevisionIndex, setOpenRevisionIndex] = useState<number | null>(null);
+  const [sectionInstruction, setSectionInstruction] = useState('');
+  const [isRevising, setIsRevising] = useState(false);
+  const [revisionError, setRevisionError] = useState('');
+
+  const handleOpenRevision = (index: number) => {
+    if (openRevisionIndex === index) {
+      // 同じパネルをクリックしたら閉じる
+      setOpenRevisionIndex(null);
+      setSectionInstruction('');
+      setRevisionError('');
+    } else {
+      setOpenRevisionIndex(index);
+      setSectionInstruction('');
+      setRevisionError('');
+    }
+  };
+
+  const handleSectionRevise = async (sectionIndex: number, sectionHeading: string) => {
+    if (!sectionInstruction.trim() || !onRevise) return;
+    setIsRevising(true);
+    setRevisionError('');
+    try {
+      const contextualInstruction =
+        '「H2-' + (sectionIndex + 1) + ': ' + sectionHeading + '」のセクションを修正してください。\n' + sectionInstruction.trim();
+      await onRevise(contextualInstruction);
+      setSectionInstruction('');
+      setOpenRevisionIndex(null);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '修正に失敗しました';
+      setRevisionError(msg);
+    } finally {
+      setIsRevising(false);
+    }
+  };
+
+  const handleGlobalRevise = async () => {
+    if (!globalInstruction.trim() || !onRevise) return;
+    setIsGlobalRevising(true);
+    setGlobalRevisionError('');
+    try {
+      await onRevise(globalInstruction.trim());
+      setGlobalInstruction('');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '修正に失敗しました';
+      setGlobalRevisionError(msg);
+    } finally {
+      setIsGlobalRevising(false);
+    }
+  };
 
   const handleCopyAsMarkdown = () => {
     const markdown = `
@@ -48,7 +160,15 @@ ${keyword}
 ## 検索意図（主/副）
 - 主: ${outline.searchIntent.primary}
 ${outline.searchIntent.secondary ? `- 副: ${outline.searchIntent.secondary}` : ''}
-
+${outline.searchIntentAnalysis ? `
+## 検索意図3軸分析
+- ① 解決したい問題: ${outline.searchIntentAnalysis.problem}
+- ② 知りたい情報: ${outline.searchIntentAnalysis.information}
+- ③ なりたい状態: ${outline.searchIntentAnalysis.desiredOutcome}
+${outline.articlePurpose ? `
+## 記事の目的・ストーリー
+${outline.articlePurpose}
+` : ''}` : ''}
 ## タイトル（${countCharacters(outline.title)}文字）
 ${outline.title}
 
@@ -56,7 +176,7 @@ ${outline.title}
 ${outline.metaDescription}
 
 ## 目標文字数
-${outline.characterCountAnalysis ? `約${Math.round(outline.characterCountAnalysis.average / 100) * 100}文字（競合平均: ${outline.characterCountAnalysis.average.toLocaleString()}文字）` : '未設定'}
+5,000〜6,000文字（自社設定値）${outline.characterCountAnalysis ? `　※競合平均: ${outline.characterCountAnalysis.average.toLocaleString()}文字（参考値）` : ''}
 
 ## ターゲット読者
 ${outline.targetAudience}
@@ -123,9 +243,20 @@ ${outline.competitorComparison.differentiators.map((diff, i) => `  ${i + 1}) ${d
       {/* ヘッダー */}
       <div className="space-y-4">
         <div className="relative text-center">
-          <span className="absolute top-0 left-0 px-3 py-1 bg-gradient-to-r from-blue-500 to-indigo-500 text-white text-xs font-bold rounded-full">
-            Ver.2
-          </span>
+          <div className="absolute top-0 left-0 flex items-center gap-2">
+            <span className="px-3 py-1 bg-gradient-to-r from-blue-500 to-indigo-500 text-white text-xs font-bold rounded-full">
+              Ver.2
+            </span>
+            {outlineMode === 'siteData' ? (
+              <span className="px-3 py-1 bg-emerald-500 text-white text-xs font-bold rounded-full">
+                サイトデータ型
+              </span>
+            ) : (
+              <span className="px-3 py-1 bg-blue-100 text-blue-700 text-xs font-bold rounded-full">
+                標準モード
+              </span>
+            )}
+          </div>
           <h2 className="text-3xl font-bold text-gray-800 py-2">
             「<span className="text-blue-600">{keyword}</span>」の構成案
           </h2>
@@ -140,14 +271,6 @@ ${outline.competitorComparison.differentiators.map((diff, i) => `  ${i + 1}) ${d
             <ClipboardIcon className="w-5 h-5" />
             {copyButtonText}
           </button>
-          {onStartWritingV1 && (
-            <button
-              onClick={onStartWritingV1}
-              className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-blue-500 to-blue-600 text-white font-semibold rounded-xl hover:from-blue-600 hover:to-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-all duration-200 ease-in-out text-sm shadow-sm"
-            >
-              執筆開始（Ver.1）
-            </button>
-          )}
           {onStartWritingV3 && (
             <button
               onClick={onStartWritingV3}
@@ -155,6 +278,19 @@ ${outline.competitorComparison.differentiators.map((diff, i) => `  ${i + 1}) ${d
             >
               執筆開始（Ver.3 Pro）
               <span className="text-xs bg-white/20 px-2 py-0.5 rounded">NEW</span>
+            </button>
+          )}
+          {onSave && (
+            <button
+              onClick={handleSave}
+              disabled={isSaving || isSaved}
+              className={`flex items-center gap-2 px-4 py-2 font-semibold rounded-xl text-sm transition-all duration-200 border ${
+                isSaved || saveMessage === 'saved'
+                  ? 'bg-green-50 text-green-700 border-green-300 cursor-default'
+                  : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+              } disabled:opacity-60`}
+            >
+              {isSaving ? '保存中...' : (isSaved || saveMessage === 'saved') ? '✅ 保存済み' : '💾 保存'}
             </button>
           )}
         </div>
@@ -201,17 +337,55 @@ ${outline.competitorComparison.differentiators.map((diff, i) => `  ${i + 1}) ${d
         </div>
 
         {/* 目標文字数 */}
-        {outline.characterCountAnalysis && (
-          <Card icon={<CharacterCountIcon className="w-6 h-6 text-blue-500" />} title="目標文字数">
-            <p className="text-lg font-semibold text-gray-800">
-              約 {Math.round(outline.characterCountAnalysis.average / 100) * 100} 文字
+        <Card icon={<CharacterCountIcon className="w-6 h-6 text-blue-500" />} title="目標文字数">
+          <p className="text-lg font-semibold text-gray-800">
+            5,000〜6,000 文字
+          </p>
+          <p className="text-sm text-gray-500 mt-2">
+            自社設定値（読者の離脱防止のため上限6,000字）
+          </p>
+          {outline.characterCountAnalysis && (
+            <p className="text-xs text-gray-400 mt-1">
+              ※ 競合平均: {outline.characterCountAnalysis.average.toLocaleString()} 文字（参考値のみ）
             </p>
-            <p className="text-sm text-gray-500 mt-2">
-              競合上位記事の平均: {outline.characterCountAnalysis.average.toLocaleString()} 文字
-            </p>
-          </Card>
-        )}
+          )}
+        </Card>
       </div>
+
+      {/* 検索意図3軸分析（統合版プロンプトで生成された場合のみ表示） */}
+      {outline.searchIntentAnalysis && (
+        <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-5">
+          <h3 className="text-base font-bold text-indigo-800 mb-3 flex items-center gap-2">
+            <span>🧭</span> 検索意図3軸分析
+          </h3>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="bg-white rounded-lg p-3 border border-indigo-100">
+              <p className="text-xs font-bold text-indigo-600 mb-1">① 解決したい問題</p>
+              <p className="text-sm text-gray-700">{outline.searchIntentAnalysis.problem}</p>
+            </div>
+            <div className="bg-white rounded-lg p-3 border border-indigo-100">
+              <p className="text-xs font-bold text-indigo-600 mb-1">② 知りたい情報</p>
+              <p className="text-sm text-gray-700">{outline.searchIntentAnalysis.information}</p>
+            </div>
+            <div className="bg-white rounded-lg p-3 border border-indigo-100">
+              <p className="text-xs font-bold text-indigo-600 mb-1">③ なりたい状態</p>
+              <p className="text-sm text-gray-700">{outline.searchIntentAnalysis.desiredOutcome}</p>
+            </div>
+          </div>
+          {outline.articlePurpose && (
+            <div className="mt-3 bg-white rounded-lg p-3 border border-indigo-100">
+              <p className="text-xs font-bold text-indigo-600 mb-1">🎯 記事の目的・ストーリー</p>
+              <p className="text-sm text-gray-700">{outline.articlePurpose}</p>
+            </div>
+          )}
+          {outline.articleFlow && (
+            <div className="mt-2 bg-white rounded-lg p-3 border border-indigo-100">
+              <p className="text-xs font-bold text-indigo-600 mb-1">📖 記事の流れ</p>
+              <p className="text-sm text-gray-700">{outline.articleFlow}</p>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ターゲット読者 */}
       <Card icon={<TargetIcon className="w-6 h-6 text-blue-500" />} title="ターゲット読者">
@@ -271,10 +445,96 @@ ${outline.competitorComparison.differentiators.map((diff, i) => `  ${i + 1}) ${d
                   ))}
                 </ul>
               )}
+
+              {/* セクション修正ボタン＆パネル */}
+              {onRevise && (
+                <div className="mt-2">
+                  <button
+                    onClick={() => handleOpenRevision(index)}
+                    disabled={isRevising}
+                    className={`text-xs px-3 py-1.5 rounded-lg border transition-colors flex items-center gap-1 ${
+                      openRevisionIndex === index
+                        ? 'bg-amber-100 border-amber-400 text-amber-800'
+                        : 'bg-white border-gray-300 text-gray-500 hover:bg-amber-50 hover:border-amber-300 hover:text-amber-700'
+                    }`}
+                  >
+                    <span>✏️</span>
+                    {openRevisionIndex === index ? 'パネルを閉じる' : 'このセクションを修正依頼'}
+                  </button>
+
+                  {openRevisionIndex === index && (
+                    <div className="mt-2 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+                      <p className="text-xs text-amber-700 mb-2 font-medium">
+                        H2-{index + 1}「{section.heading}」への修正指示
+                      </p>
+                      <p className="text-xs text-amber-600 mb-2">
+                        例：「H3を2つ追加して」「見出しをもっと具体的に」「このセクションは不要なので削除して」
+                      </p>
+                      <textarea
+                        value={sectionInstruction}
+                        onChange={(e) => setSectionInstruction(e.target.value)}
+                        placeholder="修正内容を入力してください..."
+                        className="w-full h-20 px-3 py-2 border border-amber-300 rounded-lg text-sm resize-none focus:outline-none focus:ring-2 focus:ring-amber-400 bg-white"
+                        disabled={isRevising}
+                      />
+                      {revisionError && openRevisionIndex === index && (
+                        <p className="text-xs text-red-600 mt-1">❌ {revisionError}</p>
+                      )}
+                      <div className="flex justify-end mt-2">
+                        <button
+                          onClick={() => handleSectionRevise(index, section.heading)}
+                          disabled={isRevising || !sectionInstruction.trim()}
+                          className="px-4 py-1.5 bg-amber-500 text-white text-sm font-semibold rounded-lg hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        >
+                          {isRevising ? '✨ AI修正中...' : '✨ AI修正を実行'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           ))}
         </div>
       </Card>
+
+      {/* 全体AI修正パネル */}
+      {onRevise && (
+        <div className="bg-gradient-to-r from-indigo-50 to-blue-50 border-2 border-indigo-200 rounded-xl p-6">
+          <div className="flex items-center gap-3 mb-1">
+            <span className="text-2xl">🔄</span>
+            <div>
+              <h3 className="text-lg font-bold text-indigo-800">構成案をAIで修正</h3>
+            </div>
+          </div>
+          <p className="text-sm text-indigo-600 mb-4 ml-11">
+            特定のセクションへの部分修正も、「全部作り直して」などの全体再設計も対応しています。
+          </p>
+          <textarea
+            value={globalInstruction}
+            onChange={(e) => setGlobalInstruction(e.target.value)}
+            placeholder={'修正指示を自由に入力してください。\n例：「FAQセクションを追加して」「H2を1つ削って全体をコンパクトにして」「全体を作り直して、もっとコスト削減にフォーカスした構成にして」'}
+            className="w-full h-32 px-4 py-3 border border-indigo-300 rounded-lg text-sm resize-none focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white"
+            disabled={isGlobalRevising}
+          />
+          {globalRevisionError && (
+            <p className="text-xs text-red-600 mt-2">❌ {globalRevisionError}</p>
+          )}
+          <div className="flex justify-end mt-3">
+            <button
+              onClick={handleGlobalRevise}
+              disabled={isGlobalRevising || !globalInstruction.trim()}
+              className="px-6 py-2 bg-indigo-600 text-white font-semibold rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
+            >
+              {isGlobalRevising ? (
+                <span>✨ AI修正中...</span>
+              ) : (
+                <span>🔄 AI修正を実行</span>
+              )}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* 競合比較サマリ */}
       <Card icon={<CharacterCountIcon className="w-6 h-6 text-blue-500" />} title="競合比較サマリ">
@@ -329,6 +589,7 @@ ${outline.competitorComparison.differentiators.map((diff, i) => `  ${i + 1}) ${d
           ))}
         </div>
       </Card>
+
     </div>
   );
 };

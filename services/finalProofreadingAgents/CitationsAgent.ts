@@ -84,6 +84,17 @@ ${content}
 - 学術機関・研究所
 - 業界団体の公式サイト
 
+【🔴 出典URLの形式チェック（内容確認前に判定）】
+以下のパターンに該当する場合、内容を見るまでもなく出典として不適切と判定し、issueとして報告すること。
+
+- ❌ 検索結果ページ（google.com/search, bing.com/search, yahoo.co.jp/search, search.*.co.jp 等）
+- ❌ ECサイト・モール検索ページ（amazon.co.jp/s, rakuten.co.jp/search 等）がキャンペーン・価格情報の出典
+- ❌ SNSのプロフィールページ（twitter.com/xxx, x.com/xxx, instagram.com/xxx, facebook.com/xxx のプロフィール）が公的データの出典
+- ❌ Wikipediaが「最新の公的統計・調査データ」の出典（一般知識の参照は許容、数値根拠としての使用は不適切）
+- ❌ 自社ドメイン以外のページが「自社施工事例・自社実績」の出典
+
+これらは即時に severity: "critical" として報告し、公的機関・業界団体・一次ソースへの差し替えを指示する。
+
 【出力形式】
 {
   "score": 0-100の評価点,

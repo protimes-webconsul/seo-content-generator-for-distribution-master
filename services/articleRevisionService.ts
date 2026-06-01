@@ -1,5 +1,5 @@
 // 記事修正サービス（Gemini 2.5 Pro使用）
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenAI } from "@google/genai";
 import type { Issue } from "./finalProofreadingAgents/types";
 import {
   parseArticleElements,
@@ -10,9 +10,9 @@ import { curriculumDataService } from "./curriculumDataService";
 // latestAIModelsは汎用化のため削除
 
 // Gemini APIクライアントの初期化
-const genAI = new GoogleGenerativeAI(
-  import.meta.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY || ""
-);
+const genAI = new GoogleGenAI({
+  apiKey: import.meta.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY || ""
+});
 
 // 環境変数から自社URLパターンを取得（出典優先順位に使用）
 const COMPANY_NOTE_URL = import.meta.env.VITE_COMPANY_NOTE_URL || "";
@@ -371,7 +371,7 @@ async function fetchCompanyData(): Promise<any> {
     const apiKey = import.meta.env.VITE_INTERNAL_API_KEY;
 
     const backendUrl =
-      import.meta.env.VITE_BACKEND_URL || "http://localhost:3001";
+      import.meta.env.VITE_BACKEND_URL || "http://localhost:3010";
     const response = await fetch(`${backendUrl}/api/company-data`, {
       headers: {
         ...(apiKey && { "x-api-key": apiKey }),
@@ -434,15 +434,10 @@ export async function reviseArticle(
       .join("\n\n");
 
     // モデル設定（既存の修正関数と同じ設定）
-    const modelConfig: any = {
-      model: "gemini-2.5-pro",
-      generationConfig: {
-        temperature: 0.3, // 低めの温度で正確性重視
-        maxOutputTokens: 16384, // 長文対応
-      },
+    const revisionConfig = {
+      temperature: 0.3, // 低めの温度で正確性重視
+      maxOutputTokens: 16384, // 長文対応
     };
-
-    const model = genAI.getGenerativeModel(modelConfig);
 
     const prompt = `あなたはSEO記事修正の専門家です。以下の記事を、ユーザーの修正指示に従って修正してください。
 
@@ -506,12 +501,16 @@ ${articleContent}
     const startTime = Date.now();
     console.log("⏱️ Gemini API呼び出し開始...");
 
-    const result = await model.generateContent(prompt);
+    const result = await genAI.models.generateContent({
+      model: "gemini-3.1-pro-preview",
+      contents: prompt,
+      config: revisionConfig
+    });
 
     const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`✅ API応答受信（処理時間: ${elapsedTime}秒）`);
 
-    const revisedContent = result.response.text();
+    const revisedContent = result.text || '';
 
     if (!revisedContent) {
       throw new Error("修正結果が生成されませんでした");
@@ -609,12 +608,9 @@ ${relevantSegments
     companyDataContext = "";
   }
 
-  const modelConfig: any = {
-    model: "gemini-2.5-pro",
-    generationConfig: {
-      temperature: 0.3, // 低めの温度で正確性重視
-      maxOutputTokens: 16384, // 長文対応（8192→16384）
-    },
+  const singleIssueConfig: any = {
+    temperature: 0.3, // 低めの温度で正確性重視
+    maxOutputTokens: 16384, // 長文対応（8192→16384）
     // Grounding機能を有効化（最新情報を取得）
     tools: [
       {
@@ -622,8 +618,6 @@ ${relevantSegments
       },
     ],
   };
-
-  const model = genAI.getGenerativeModel(modelConfig);
 
   // actionTypeによってプロンプトを調整
   const actionType = (issue as any).actionType || "add-source";
@@ -748,13 +742,16 @@ ${originalArticle}
     console.log("⏱️ Gemini API呼び出し開始...");
 
     // シンプルにAPIを呼び出し（執筆エージェントと同じ方式）
-    const result = await model.generateContent(prompt);
+    const result = await genAI.models.generateContent({
+      model: "gemini-3.1-pro-preview",
+      contents: prompt,
+      config: singleIssueConfig
+    });
 
     const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`✅ API応答受信（処理時間: ${elapsedTime}秒）`);
 
-    const response = await result.response;
-    let revisedArticle = response.text();
+    let revisedArticle = result.text || '';
 
     console.log("📝 修正記事の長さ:", revisedArticle.length);
 
@@ -1260,12 +1257,9 @@ ${relevantSegments
     companyDataContext = "";
   }
 
-  const modelConfig: any = {
-    model: "gemini-2.5-pro",
-    generationConfig: {
-      temperature: 0.3,
-      maxOutputTokens: 16384, // 長文対応（8192→16384）
-    },
+  const batchRevisionConfig: any = {
+    temperature: 0.3,
+    maxOutputTokens: 16384, // 長文対応（8192→16384）
     // Grounding機能を有効化（最新情報を取得）
     tools: [
       {
@@ -1273,8 +1267,6 @@ ${relevantSegments
       },
     ],
   };
-
-  const model = genAI.getGenerativeModel(modelConfig);
 
   // デバッグ: 受け取った問題を確認
   console.log("📋 修正サービスが受け取った問題:");
@@ -1454,15 +1446,18 @@ ${originalArticle}
     console.log("⏱️ Gemini API呼び出し開始（一括修正）...");
 
     // シンプルにAPIを呼び出し（執筆エージェントと同じ方式）
-    const result = await model.generateContent(prompt);
+    const result = await genAI.models.generateContent({
+      model: "gemini-3.1-pro-preview",
+      contents: prompt,
+      config: batchRevisionConfig
+    });
 
     const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`✅ API応答受信（処理時間: ${elapsedTime}秒）`);
 
     console.log("✅ 一括修正API応答受信");
 
-    const response = await result.response;
-    let revisedArticle = response.text();
+    let revisedArticle = result.text || '';
 
     console.log("📝 一括修正記事の長さ:", revisedArticle.length);
 

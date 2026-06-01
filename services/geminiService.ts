@@ -13,7 +13,7 @@ if (apiKey.includes("PLACEHOLDER") || apiKey.length < 30) {
 }
 
 console.log("✅ API key loaded successfully");
-const ai = new GoogleGenAI({ apiKey });
+const ai = new GoogleGenerativeAI(apiKey);
 
 const responseSchema = {
   type: Type.OBJECT,

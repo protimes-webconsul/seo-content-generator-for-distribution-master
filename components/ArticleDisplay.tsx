@@ -1,6 +1,7 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useRef } from "react";
 import type { SeoOutline } from "../types";
 import { generateFaqSchemaFromArticle } from "../utils/faqSchemaGenerator";
+import { reviseArticle } from "../services/articleRevisionService";
 
 interface ArticleDisplayProps {
   article: {
@@ -18,6 +19,53 @@ interface ArticleDisplayProps {
     keyword: string;
     autoMode?: boolean;
   }) => void;
+  onArticleUpdate?: (htmlContent: string) => void;
+  onSave?: () => Promise<void>;
+  isSaved?: boolean;
+  onExportForCheck?: () => void;
+  onImportChecked?: (file: File) => void;
+}
+
+// ────────────────────────────────────────────────
+// H2セクション分割ユーティリティ
+// ────────────────────────────────────────────────
+interface ArticleSection {
+  heading: string | null;
+  content: string;
+  sectionIndex: number; // -1: H2前、0以上: H2セクション番号
+}
+
+function parseArticleSections(html: string): ArticleSection[] {
+  const sections: ArticleSection[] = [];
+  const h2Regex = /<h2[^>]*>[\s\S]*?<\/h2>/gi;
+  const matches: Array<{ index: number; match: string }> = [];
+
+  let m = h2Regex.exec(html);
+  while (m !== null) {
+    matches.push({ index: m.index, match: m[0] });
+    m = h2Regex.exec(html);
+  }
+
+  if (matches.length === 0) {
+    return [{ heading: null, content: html, sectionIndex: -1 }];
+  }
+
+  // H2前のコンテンツ
+  const firstIndex = matches[0].index;
+  if (firstIndex > 0) {
+    sections.push({ heading: null, content: html.slice(0, firstIndex), sectionIndex: -1 });
+  }
+
+  // 各H2セクション
+  for (let i = 0; i < matches.length; i++) {
+    const start = matches[i].index;
+    const end = i < matches.length - 1 ? matches[i + 1].index : html.length;
+    const sectionHtml = html.slice(start, end);
+    const headingText = matches[i].match.replace(/<[^>]+>/g, '').trim();
+    sections.push({ heading: headingText, content: sectionHtml, sectionIndex: i });
+  }
+
+  return sections;
 }
 
 const ArticleDisplay: React.FC<ArticleDisplayProps> = ({
@@ -26,9 +74,98 @@ const ArticleDisplay: React.FC<ArticleDisplayProps> = ({
   outline,
   onEditClick,
   onOpenImageAgent,
+  onArticleUpdate,
+  onSave,
+  isSaved,
+  onExportForCheck,
+  onImportChecked,
 }) => {
+  const importInputRef = useRef<HTMLInputElement>(null);
   const [viewMode, setViewMode] = useState<"preview" | "code">("preview");
   const [copyButtonText, setCopyButtonText] = useState("HTMLコピー");
+  const [isSavingArticle, setIsSavingArticle] = useState(false);
+  const [articleSaveMessage, setArticleSaveMessage] = useState('');
+
+  const handleSaveArticle = async () => {
+    if (!onSave) return;
+    setIsSavingArticle(true);
+    setArticleSaveMessage('');
+    try {
+      await onSave();
+      setArticleSaveMessage('saved');
+    } catch (err) {
+      setArticleSaveMessage('error');
+    } finally {
+      setIsSavingArticle(false);
+    }
+  };
+  const [highlightProprietary, setHighlightProprietary] = useState(false);
+
+  // セクション別修正パネルの状態
+  const [openRevisionIndex, setOpenRevisionIndex] = useState<number | null>(null);
+  const [sectionInstruction, setSectionInstruction] = useState('');
+  const [isRevising, setIsRevising] = useState(false);
+  const [revisionError, setRevisionError] = useState('');
+  const [revisionSuccess, setRevisionSuccess] = useState('');
+
+  // H2セクションに分割（プレビューモード用）
+  const articleSections = useMemo(
+    function() { return parseArticleSections(article.htmlContent); },
+    [article.htmlContent]
+  );
+  const hasH2Sections = articleSections.some(function(s) { return s.sectionIndex >= 0; });
+
+  const handleOpenRevision = (index: number) => {
+    if (openRevisionIndex === index) {
+      setOpenRevisionIndex(null);
+      setSectionInstruction('');
+      setRevisionError('');
+    } else {
+      setOpenRevisionIndex(index);
+      setSectionInstruction('');
+      setRevisionError('');
+      setRevisionSuccess('');
+    }
+  };
+
+  const handleSectionRevise = async (sectionIndex: number, sectionHeading: string) => {
+    if (!sectionInstruction.trim() || !onArticleUpdate) return;
+    setIsRevising(true);
+    setRevisionError('');
+    setRevisionSuccess('');
+    try {
+      const contextualInstruction =
+        '「' + sectionHeading + '」のセクションを修正してください。\n' + sectionInstruction.trim();
+      const result = await reviseArticle(article.htmlContent, contextualInstruction);
+      if (result.success && result.revised) {
+        onArticleUpdate(result.revised);
+        setRevisionSuccess('✅ 修正が完了しました');
+        setSectionInstruction('');
+        setOpenRevisionIndex(null);
+      } else {
+        setRevisionError(result.error || '修正に失敗しました');
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '修正に失敗しました';
+      setRevisionError(msg);
+    } finally {
+      setIsRevising(false);
+    }
+  };
+
+  // 独自情報ハイライト用スタイル
+  const proprietaryStyle = highlightProprietary
+    ? `.article-content .proprietary-info {
+        background-color: #fef9c3;
+        border-left: 3px solid #eab308;
+        padding: 1px 4px;
+        border-radius: 2px;
+        font-weight: 500;
+      }`
+    : `.article-content .proprietary-info { /* ハイライトOFF */ }`;
+
+  // ハイライトOFF時はタグを透過（スタイルのみ制御）
+  const hasProprietaryInfo = article.htmlContent.includes('class="proprietary-info"');
 
   // FAQPage JSON-LD を生成
   var faqJsonLd = useMemo(function () {
@@ -71,66 +208,6 @@ ${article.plainText}`;
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  };
-
-  const handleOpenImageGenerator = () => {
-    // 画像生成エージェントに記事データを渡す
-    // 修正済みの最新記事を優先的に使用
-    const articleData = {
-      title: article.title,
-      htmlContent: article.htmlContent, // 常に最新の記事内容を使用
-      metaDescription: article.metaDescription,
-      keyword: keyword,
-      slug: (article as any).slug || "auto-generated",
-    };
-
-    console.log("🎨 画像生成エージェントへデータを送信");
-    console.log(`  - タイトル: ${articleData.title}`);
-    console.log(`  - 記事文字数: ${articleData.htmlContent.length}文字`);
-    console.log(`  - キーワード: ${articleData.keyword}`);
-
-    // localStorageにデータを保存（AI Article Imager for WordPressが読み込み用）
-    localStorage.setItem("articleDataForImageGen", JSON.stringify(articleData));
-
-    // iframe版で開く
-    if (onOpenImageAgent) {
-      console.log("🖼️ 画像生成エージェントをiframeで開きます...");
-      onOpenImageAgent({
-        title: articleData.title,
-        content: articleData.htmlContent,
-        keyword: articleData.keyword,
-        autoMode: false, // 手動なのでautoModeはfalse
-        metaDescription: articleData.metaDescription,
-        slug: articleData.slug,
-        isTestMode: false,
-      });
-      console.log("✅ iframe起動完了");
-    } else {
-      // フォールバック: 別タブで開く
-      const imageGenUrl =
-        import.meta.env.VITE_IMAGE_GEN_URL ||
-        "http://localhost:5177";
-      const imageGenOrigin = new URL(imageGenUrl).origin;
-
-      console.log(`🚀 AI Article Imager for WordPressを開きます: ${imageGenUrl}`);
-      const newWindow = window.open(imageGenUrl, "_blank");
-
-      if (newWindow) {
-        setTimeout(() => {
-          console.log(
-            "📮 AI Article Imager for WordPressにpostMessageでデータを送信中..."
-          );
-          newWindow.postMessage(
-            {
-              type: "ARTICLE_DATA",
-              data: articleData,
-            },
-            imageGenOrigin
-          );
-          console.log("✅ postMessage送信完了");
-        }, 3000);
-      }
-    }
   };
 
   const handleDownloadHtml = () => {
@@ -233,13 +310,49 @@ ${article.plainText}`;
           >
             HTML DL
           </button>
-          <button
-            onClick={handleOpenImageGenerator}
-            className="px-4 py-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white rounded-lg transition-all flex items-center gap-2 font-semibold shadow-sm animate-pulse"
-            title="画像生成エージェントで記事に画像を挿入"
-          >
-            画像生成へ
-          </button>
+          {onExportForCheck && (
+            <button
+              onClick={onExportForCheck}
+              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition-colors shadow-sm"
+              title="ClaudeProjectへの最終チェック依頼用ファイルをダウンロード"
+            >
+              📤 チェック用DL
+            </button>
+          )}
+          {onImportChecked && (
+            <label
+              className="px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-lg transition-colors shadow-sm cursor-pointer"
+              title="ClaudeProjectから返ってきた修正済みファイルを取り込む"
+            >
+              📥 修正済みDL
+              <input
+                ref={importInputRef}
+                type="file"
+                accept=".md,.txt"
+                className="hidden"
+                onChange={function(e) {
+                  const file = e.target.files && e.target.files[0];
+                  if (file) {
+                    onImportChecked(file);
+                  }
+                  e.target.value = '';
+                }}
+              />
+            </label>
+          )}
+          {onSave && (
+            <button
+              onClick={handleSaveArticle}
+              disabled={isSavingArticle}
+              className={`px-4 py-2 rounded-lg font-semibold text-sm transition-colors border ${
+                isSaved || articleSaveMessage === 'saved'
+                  ? 'bg-green-50 text-green-700 border-green-300 cursor-default'
+                  : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+              } disabled:opacity-60`}
+            >
+              {isSavingArticle ? '保存中...' : (isSaved || articleSaveMessage === 'saved') ? '✅ 保存済み' : '💾 保存'}
+            </button>
+          )}
         </div>
       </div>
 
@@ -309,19 +422,117 @@ ${article.plainText}`;
           <div className="bg-white rounded-lg p-8 text-gray-900">
             <style dangerouslySetInnerHTML={{ __html: `
               .article-content .source-citation { font-size: 0.85em; color: #6b7280; margin-top: 4px; margin-bottom: 16px; }
+              ${proprietaryStyle}
             `}} />
+            {hasProprietaryInfo && (
+              <div className="mb-4 flex items-center gap-3">
+                <button
+                  onClick={() => setHighlightProprietary(!highlightProprietary)}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-colors ${
+                    highlightProprietary
+                      ? 'bg-yellow-100 border-yellow-400 text-yellow-800'
+                      : 'bg-gray-100 border-gray-300 text-gray-600 hover:bg-gray-200'
+                  }`}
+                >
+                  <span>{highlightProprietary ? '🟡' : '⬜'}</span>
+                  独自情報ハイライト {highlightProprietary ? 'ON' : 'OFF'}
+                </button>
+                {highlightProprietary && (
+                  <span className="text-xs text-yellow-700 bg-yellow-50 border border-yellow-200 px-2 py-1 rounded">
+                    黄色マーカー部分が取引先独自情報です（確認用・投稿には影響しません）
+                  </span>
+                )}
+              </div>
+            )}
+            {revisionSuccess && (
+              <div className="mb-4 px-4 py-2 bg-green-50 border border-green-300 rounded-lg text-sm text-green-700">
+                {revisionSuccess}
+              </div>
+            )}
             <h1 className="text-3xl font-bold mb-6 pb-4 border-b-2 border-blue-600">
               {article.title}
             </h1>
-            <div
-              className="prose prose-lg max-w-none article-content
-                prose-h2:text-2xl prose-h2:font-bold prose-h2:text-blue-900 prose-h2:mt-8 prose-h2:mb-4 prose-h2:pb-2 prose-h2:border-b-2 prose-h2:border-blue-200
-                prose-h3:text-xl prose-h3:font-bold prose-h3:text-blue-700 prose-h3:mt-6 prose-h3:mb-3
-                prose-p:text-gray-700 prose-p:leading-relaxed
-                prose-strong:text-blue-900 prose-strong:font-bold
-                prose-ul:my-4 prose-li:my-1"
-              dangerouslySetInnerHTML={{ __html: article.htmlContent }}
-            />
+
+            {/* H2セクションごとに分割してレンダリング（修正ボタン付き） */}
+            {hasH2Sections && onArticleUpdate ? (
+              <div className="article-content">
+                {articleSections.map(function(section, idx) {
+                  return (
+                    <div key={idx}>
+                      {/* セクション本文 */}
+                      <div
+                        className="prose prose-lg max-w-none
+                          prose-h2:text-2xl prose-h2:font-bold prose-h2:text-blue-900 prose-h2:mt-8 prose-h2:mb-4 prose-h2:pb-2 prose-h2:border-b-2 prose-h2:border-blue-200
+                          prose-h3:text-xl prose-h3:font-bold prose-h3:text-blue-700 prose-h3:mt-6 prose-h3:mb-3
+                          prose-p:text-gray-700 prose-p:leading-relaxed
+                          prose-strong:text-blue-900 prose-strong:font-bold
+                          prose-ul:my-4 prose-li:my-1"
+                        dangerouslySetInnerHTML={{ __html: section.content }}
+                      />
+
+                      {/* H2セクションのみ修正ボタンを表示 */}
+                      {section.sectionIndex >= 0 && section.heading && (
+                        <div className="my-3">
+                          <button
+                            onClick={function() { handleOpenRevision(section.sectionIndex); }}
+                            disabled={isRevising}
+                            className={`text-xs px-3 py-1.5 rounded-lg border transition-colors flex items-center gap-1 ${
+                              openRevisionIndex === section.sectionIndex
+                                ? 'bg-amber-100 border-amber-400 text-amber-800'
+                                : 'bg-white border-gray-300 text-gray-500 hover:bg-amber-50 hover:border-amber-300 hover:text-amber-700'
+                            }`}
+                          >
+                            <span>✏️</span>
+                            {openRevisionIndex === section.sectionIndex ? 'パネルを閉じる' : 'このセクションを修正依頼'}
+                          </button>
+
+                          {openRevisionIndex === section.sectionIndex && (
+                            <div className="mt-2 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+                              <p className="text-xs text-amber-700 mb-1 font-medium">
+                                「{section.heading}」への修正指示
+                              </p>
+                              <p className="text-xs text-amber-600 mb-2">
+                                例：「具体的な数値を追加して」「このセクションにH3を2つ追加して」「文章をもっと簡潔に」
+                              </p>
+                              <textarea
+                                value={sectionInstruction}
+                                onChange={function(e) { setSectionInstruction(e.target.value); }}
+                                placeholder="修正内容を入力してください..."
+                                className="w-full h-20 px-3 py-2 border border-amber-300 rounded-lg text-sm resize-none focus:outline-none focus:ring-2 focus:ring-amber-400 bg-white"
+                                disabled={isRevising}
+                              />
+                              {revisionError && openRevisionIndex === section.sectionIndex && (
+                                <p className="text-xs text-red-600 mt-1">❌ {revisionError}</p>
+                              )}
+                              <div className="flex justify-end mt-2">
+                                <button
+                                  onClick={function() { handleSectionRevise(section.sectionIndex, section.heading || ''); }}
+                                  disabled={isRevising || !sectionInstruction.trim()}
+                                  className="px-4 py-1.5 bg-amber-500 text-white text-sm font-semibold rounded-lg hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                >
+                                  {isRevising ? '✨ AI修正中...' : '✨ AI修正を実行'}
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              // onArticleUpdate未設定 or H2なし → 従来通り一括表示
+              <div
+                className="prose prose-lg max-w-none article-content
+                  prose-h2:text-2xl prose-h2:font-bold prose-h2:text-blue-900 prose-h2:mt-8 prose-h2:mb-4 prose-h2:pb-2 prose-h2:border-b-2 prose-h2:border-blue-200
+                  prose-h3:text-xl prose-h3:font-bold prose-h3:text-blue-700 prose-h3:mt-6 prose-h3:mb-3
+                  prose-p:text-gray-700 prose-p:leading-relaxed
+                  prose-strong:text-blue-900 prose-strong:font-bold
+                  prose-ul:my-4 prose-li:my-1"
+                dangerouslySetInnerHTML={{ __html: article.htmlContent }}
+              />
+            )}
           </div>
         ) : (
           // コードモード

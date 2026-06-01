@@ -2,7 +2,7 @@
 import { WPConfig, PostConfig, H2Section } from '../types';
 
 // サーバーのAPIエンドポイント（環境変数から取得、デフォルトはローカル）
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3010/api';
 
 // 認証ヘッダーを取得（ローカル開発用）
 const getAuthHeaders = () => {
