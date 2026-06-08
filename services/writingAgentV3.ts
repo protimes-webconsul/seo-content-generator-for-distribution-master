@@ -283,6 +283,11 @@ readability_rules:
     - "〜といったような → 〜など"
     - "まず最初に → まず"
 
+  rhythm_variation:
+    masu_consecutive_max: 3  # 「〜ます。」が3回連続したら次は体言止め・倒置・接続詞に切り替える
+    section_ending_variety: true  # 各H3の末尾表現を「言い切り／問いかけ／体言止め／具体例提示」の4パターンから選んでローテーションする
+    paragraph_opening_variety: true  # 同じ書き出し（「〜は」「〜が」）が段落内で3回以上続かないようにする
+
 logic_methods:
   preferred: ["SDS","PREP（連打禁止）","Q→A→Why→How（用途で使い分け）"]
 
@@ -436,37 +441,104 @@ transition_words:
   
 instruction: "接続詞を使って文章を自然につなぐ。ラベル付けではなく文脈で論理を示す"
 
-ai_like_avoidance:
-  symptoms:
-    - "同一語尾/書き出しの連続"
-    - "テンプレPREPの連打"
-    - "不自然な高踏語（例：示唆されます/勘案できます）"
-    - "過度な比喩・メタファー（羅針盤、道筋、架け橋など）"
-    - "回りくどい表現（成功に導くための羅針盤を示します→成功させる方法を説明します）"
-    - "格調高すぎる表現（提示する、示唆する→説明する、紹介する）"
-    - "物理的な対象（建物・屋根・外壁・土台など）への擬人化（例：土台が健康→土台が良好な状態）"
-    - "唯一解を示す最上級表現（例：最も〜な方法、唯一の〜→有効な方法の一つ）"
+ai_avoidance_rules:
 
-  ng_words:
-    metaphors: ["羅針盤", "道筋", "架け橋", "礎", "道標", "灯台", "指針", "汗を流す（比喩）", "解き明かす"]
-    pompous: ["示唆されます", "勘案できます", "提示します", "提供します", "において", "における"]
-    redundant: ["〜することが可能です", "〜ということができます", "〜という観点から", "〜ことをおすすめします", "〜に他なりません", "〜と言えるでしょう", "大切な住まい", "大切な建物"]
-    superlatives: ["最も〜な方法", "唯一の〜", "唯一無二", "確実な〜", "〜に直結します", "驚くほど〜", "〜に値します", "不可能です"]
-    personification: ["〜が健康（建物など非生物への使用）", "〜が元気（同）", "外壁が傷む→外壁が劣化する"]
+  # --- ① 使用禁止フレーズ（1文字も出力しない） ---
+  banned_phrases:
+    hard_ban:  # 許容回数 = 0
+      - "〜ことが可能です"      # → 「〜できます」に言い換える
+      - "〜ことが重要です"      # → 「〜が重要です」または具体的な理由文に変換
+      - "〜ことが大切です"      # → 同上
+      - "〜ことが不可欠です"    # → 「〜は欠かせません」
+      - "〜ことが期待できます"  # → 「〜が期待できます」
+      - "非常に重要"
+      - "〜を心がけましょう"
+      - "〜を意識しましょう"
+      - "〜に注意しましょう"
 
-  countermeasures:
-    - "語尾ローテーション表を内的に適用して変化をつける"
-    - "各段落に新情報or角度差分を必ず1つ入れる"
-    - "NGワード辞書で自動置換："
-    - "  『示唆されます→〜と言えます』"
-    - "  『勘案できます→考慮できます』"
-    - "  『〜することが可能です→〜できます』"
-    - "  『羅針盤を示します→方法を説明します』"
-    - "  『道筋を提供します→手順を紹介します』"
-    - "  『において重要→〜で重要』"
-    - "  擬人化は物理的な表現に置き換える（例：土台が健康→土台が良好な状態）"
-    - "  最上級表現は複数の可能性を示す表現にする（例：最も〜な方法→有効な方法の一つ）"
-    - "直接的でシンプルな表現を優先（カッコつけない）"
+    soft_ban:  # 記事全体で最大1回まで
+      - "〜ことが重要です"
+      - "〜ことが大切です"
+      - "〜ことが不可欠です"
+      - "〜ことが期待できます"
+      - "〜と言えるでしょう"
+      - "〜と考えられます"
+      - "〜傾向があります"  # 最大2回まで
+
+    emphasis_cap:  # 記事全体で各語2回まで
+      - "非常に"
+      - "確実に"
+      - "著しく"
+      - "飛躍的に"
+      - "大幅に"
+      - "極めて"
+
+    ng_words:
+      metaphors: ["羅針盤", "道筋", "架け橋", "礎", "道標", "灯台", "指針", "汗を流す（比喩）", "解き明かす"]
+      pompous: ["示唆されます", "勘案できます", "提示します", "提供します", "において", "における"]
+      superlatives: ["最も〜な方法", "唯一の〜", "唯一無二", "確実な〜", "〜に直結します", "驚くほど〜", "〜に値します", "不可能です"]
+      personification: ["〜が健康（建物など非生物への使用）", "〜が元気（同）", "外壁が傷む→外壁が劣化する"]
+
+  # --- ② 冒頭・まとめの定型パターン禁止 ---
+  structure_bans:
+    lead_forbidden:
+      - "「〜していませんか。」で始まる疑問文が連続2文以上"
+      - "「本記事では〜解説します。さらに〜紹介します。〜確認してみてください。」のような宣言の羅列"
+      - "「読み終える頃には〜明確になるはずです」"
+    lead_required:
+      - "読者が抱えている「具体的な状況または金額・期間」を1〜2文で先に示す"
+      - "「本記事では〜」の宣言は1文のみ許可"
+
+    conclusion_forbidden:
+      - "「本記事で解説した要点は以下の通りです」"
+      - "「本記事で解説したように〜」"
+      - "「〜は、タイミングと業者選びで結果が大きく変わります」"
+      - "「大切な資産を守るために〜」"
+      - "「これらを踏まえた上で〜」"
+      - "「適切な対応を取ることが〜」"
+    conclusion_required:
+      - "まとめの冒頭は箇条書きから直接始めるか、前セクションを受けた1文の橋渡しで始める"
+
+  # --- ③ セクション対称性の崩し方 ---
+  section_asymmetry:
+    rule: >
+      H3が3つ以上ある場合、最重要セクションの文量を他の1.5倍以上にする。
+      各H3の最終文は「言い切り」「逆説（〜だが〜）」「読者への問いかけ」「具体的な数値・事例」の
+      いずれかで終える。同一パターンを連続させない。
+
+  # --- ④ 「概要→補足」の2文セット連打禁止 ---
+  two_sentence_pattern_ban:
+    rule: >
+      「〇〇です。そのため△△です。」「〇〇があります。これは□□です。」のような
+      概要1文＋補足1文のペアが3セット連続した場合は、段落をまとめ直すか
+      1文削除してリズムを変える。
+
+  # --- ⑤ 人間らしい書き方の具体例（few-shot） ---
+  human_writing_examples:
+    bad: |
+      外壁の劣化を放置することは危険です。
+      雨水が浸入します。
+      建物が腐食します。
+      修繕費用が増加します。
+    good: |
+      外壁の劣化を放置すると、雨水が内部に入り込み、柱や土台の腐食が進みます。
+      気づいたときには数百万円の修繕が必要になっていた——というケースも珍しくありません。
+
+    bad2: |
+      適切な塗料を選ぶことが重要です。
+      地域の気候に合わせた提案ができる業者を選ぶことが大切です。
+      アフターフォローが充実していることも確認することが不可欠です。
+    good2: |
+      大田原市の冬は「那須おろし」が吹き、外壁が凍害を受けやすい。
+      だからこそ、塗料の伸縮性と下地処理の方針を見積もり段階で確認してほしいのです。
+      保証書の有無も、10年後の安心度を左右します。
+
+    bad3: |
+      本記事で解説した重要なポイントは以下の通りです。
+      これらのポイントを踏まえた上で、適切な業者に相談することが大切です。
+    good3: |
+      チョーキング・ひび割れ・凍害——この3つのサインを見逃さなければ、
+      大田原市のアパートは十分に守れます。あとは、診断を頼む相手選びだけです。
 
 numbers_terms:
   terminology: "専門用語は初出で簡潔に定義。略語は展開後に使用"
@@ -964,6 +1036,63 @@ interface WritingRequest {
 }
 
 // ────────────────────────────────────────────────
+// 競合・ポータルサイト出典フィルター
+// source-citation タグ内の URL が競合ドメインに該当する場合、その段落を除去する
+// ────────────────────────────────────────────────
+const COMPETITOR_DOMAINS = [
+  // 外壁塗装ポータル・比較サイト
+  'nuri-kae.jp',        // ヌリカエ
+  'meetsmore.com',      // ミツモア
+  'h-pros.co.jp',       // 外壁塗装エイチプロス
+  'gaiheki-pro.jp',     // 外壁塗装プロ
+  'gaiheki-taikai.jp',  // 外壁塗装大会
+  'tosou-navi.com',     // 塗装ナビ
+  'nuriiro.jp',         // 塗り色
+  'paint-guide.jp',     // ペイントガイド
+  'gaikohekitosou.net', // 外壁塗装ドットネット
+  'gaihekicolors.com',  // 外壁カラーズ
+  'gaiheki-reform.com', // 外壁リフォームドットコム
+  'reform-plaza.jp',    // リフォームプラザ
+  'suumo.jp',           // SUUMO（リフォーム記事）
+  'homepro.co.jp',      // ホームプロ
+  'renoveru.jp',        // リノベル
+  // 塗装業者・同業他社（汎用的なパターン）
+  'tosou',              // 塗装業者ドメインの一般パターン
+  'gaiheki',            // 外壁業者ドメインの一般パターン
+];
+
+function filterCompetitorCitations(html: string): string {
+  // <p class="source-citation">...</p> を検出して競合URLを含む段落を除去
+  const citationPattern = /<p[^>]*class=["'][^"']*source-citation[^"']*["'][^>]*>[\s\S]*?<\/p>/gi;
+  let filtered = html;
+  let removedCount = 0;
+
+  filtered = filtered.replace(citationPattern, function(match) {
+    // href= から URL を抽出
+    const hrefMatch = match.match(/href=["']([^"']+)["']/i);
+    if (!hrefMatch) return match; // URL なしはそのまま
+
+    const url = hrefMatch[1].toLowerCase();
+    const isCompetitor = COMPETITOR_DOMAINS.some(function(domain) {
+      return url.includes(domain);
+    });
+
+    if (isCompetitor) {
+      removedCount++;
+      console.log('[出典フィルター] 競合サイト出典を除去:', url);
+      return ''; // 段落ごと除去
+    }
+    return match; // 問題なければそのまま
+  });
+
+  if (removedCount > 0) {
+    console.log('[出典フィルター] 合計 ' + removedCount + ' 件の競合出典を除去しました');
+  }
+
+  return filtered;
+}
+
+// ────────────────────────────────────────────────
 // アウトラインをH2セクション単位に分割（A: セクション分割）
 // ────────────────────────────────────────────────
 function splitOutlineIntoSections(outline: string): string[] {
@@ -1257,7 +1386,7 @@ ${request.referenceMaterialContext}
 
     // モデル設定
     const writingConfig: any = {
-      temperature: 0.7,
+      temperature: 0.75,
       maxOutputTokens: 16384, // 20,000文字まで対応（8192→16384に増加）
       topP: 0.9,
     };
@@ -1439,8 +1568,17 @@ ${
         ? ""
         : ("【前セクション末尾（文脈参照）】\n" + prevText + "\n\n");
       const firstSectionInstruction = isFirstSection
-        ? "このセクションにはリード文（200〜350字）も含めて書いてください。"
+        ? "H1タイトルとリード文（200〜350字）のみを書いてください。H2・H3セクションは一切書かないでください。各H2セクションは次のセクション以降で順番に執筆されます。"
         : "前のセクションとの繋がりを意識して書いてください。重複は避けてください。";
+      // 助成金制限：キーワードに関連ワードがない場合は執筆中も追加禁止
+      const subsidyKeywords = ['助成金', '補助金', '費用', '相場', '価格', '料金'];
+      const keywordHasSubsidy = subsidyKeywords.some(function(w) {
+        return request.keyword.includes(w);
+      });
+      const subsidyRestrictionInstruction = keywordHasSubsidy
+        ? ''
+        : '【助成金・補助金の制限】キーワード「' + request.keyword + '」に助成金・補助金・費用・相場・価格・料金が含まれないため、Groundingで助成金情報が見つかっても本文に追加しないこと。構成案に助成金セクションがない場合は執筆中に追加禁止。';
+
       const companyDataInstruction = companyDataText
         ? "【企業事例】提供データ内の企業のみ使用。データ外の企業は禁止。数値・成果は原文のまま。"
         : "";
@@ -1480,14 +1618,17 @@ ${groundingInstruction}
 - 企業名・事例は提供データ内のもののみ使用
 - 出典は原文の主張と一致させること
 
-【AIっぽさ回避】
-- 同じ語尾を3文以上連続させない
-- 「重要です」「求められます」「不可欠です」は最小限に
+【AIっぽさ回避（ai_avoidance_rules 準拠）】
+- hard_ban フレーズ（「〜ことが可能です」「〜ことが重要です」「非常に重要」等）は1文字も出力しない
+- 「〜ます。」が3回連続したら体言止め・倒置・接続詞にリズムを変える
+- まとめの冒頭に「本記事で解説した要点は以下の通りです」等の定型文を使わない
 - 比喩的・格調高い表現（羅針盤・道筋等）は使わない
 
 【執筆メモ・重複の混入防止】
 - 執筆作業用ラベル（「執筆メモ」「補足：」等）を本文に混入させない
 - 他セクションで既に説明した内容を繰り返さない
+
+${subsidyRestrictionInstruction}
 `;
 
       try {
@@ -1534,13 +1675,16 @@ ${groundingInstruction}
     // リード文の「」「」連続を改行処理
     const formattedText = formatLeadQuotes(text);
 
+    // 競合・ポータルサイト出典を除去
+    const citationFilteredText = filterCompetitorCitations(formattedText);
+
     // 出典テキストにGoogle検索1位URLのリンクを付与
     const clientSiteUrl =
       request.clientProfile && request.clientProfile.siteUrl
         ? request.clientProfile.siteUrl
         : "";
     const linkedText = await addLinksToSourceCitations(
-      formattedText,
+      citationFilteredText,
       clientSiteUrl
     );
 

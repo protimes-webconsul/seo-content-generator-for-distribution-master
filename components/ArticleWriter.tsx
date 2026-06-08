@@ -39,6 +39,9 @@ import { downloadExportFile, downloadHtmlForFranchise } from "../services/articl
 import { parseImportFile, readFileAsText } from "../services/articleImportService";
 import { saveRevisionLog } from "../services/revisionLogService";
 import { runClaudeQualityCheck } from "../services/claudeQualityService";
+import { runMarketingCheck, extractConclusionAndCta } from "../services/marketingCheckService";
+import type { MarketingCheckResult } from "../services/marketingCheckService";
+import MarketingCheckResultComponent from "./MarketingCheckResult";
 
 /**
  * Issueオブジェクトのoriginalフィールドを安全に文字列化
@@ -227,6 +230,11 @@ const ArticleWriter: React.FC<ArticleWriterProps> = ({
   const [claudeReport, setClaudeReport] = useState<string | null>(null);
   const [claudeRevisedHtml, setClaudeRevisedHtml] = useState<string | null>(null);
   const [showClaudeReport, setShowClaudeReport] = useState(false);
+
+  // ── マーケティングチェック ──────────────────────
+  const [isMarketingChecking, setIsMarketingChecking] = useState(false);
+  const [marketingCheckResult, setMarketingCheckResult] = useState<MarketingCheckResult | null>(null);
+  const [marketingCheckError, setMarketingCheckError] = useState<string | null>(null);
 
   // フルオート関連のステート
   const [autoMode, setAutoMode] = useState<
@@ -903,6 +911,53 @@ ${article.plainText}`;
     } finally {
       setIsClaudeProcessing(false);
     }
+  };
+
+  // マーケティングチェック実行
+  const handleMarketingCheck = async () => {
+    if (!article) return;
+    setIsMarketingChecking(true);
+    setMarketingCheckResult(null);
+    setMarketingCheckError(null);
+    try {
+      const targetAudience = outline && (outline as any).targetAudience
+        ? (outline as any).targetAudience
+        : '';
+      const result = await runMarketingCheck(
+        article.htmlContent,
+        keyword,
+        clientProfile || null,
+        targetAudience
+      );
+      setMarketingCheckResult(result);
+    } catch (err) {
+      setMarketingCheckError(
+        'マーケティングチェックエラー: ' +
+          (err instanceof Error ? err.message : String(err))
+      );
+    } finally {
+      setIsMarketingChecking(false);
+    }
+  };
+
+  // マーケティングチェック改善案を記事に反映
+  const handleApplyMarketingImprovement = (improvedHtml: string) => {
+    if (!article) return;
+    // まとめ・CTAセクションを改善案で差し替え
+    const originalCta = extractConclusionAndCta(article.htmlContent);
+    const newHtml = article.htmlContent.replace(originalCta, improvedHtml);
+    const updatedArticle = {
+      title: article.title,
+      metaDescription: article.metaDescription,
+      htmlContent: newHtml,
+      plainText: newHtml.replace(/<[^>]*>/g, '')
+    };
+    setArticle(updatedArticle);
+    setEditedContent(newHtml);
+    if (onArticleGenerated) {
+      onArticleGenerated(updatedArticle);
+    }
+    setMarketingCheckResult(null);
   };
 
   // Claude修正済み記事を適用
@@ -2513,7 +2568,7 @@ ${
                 <button
                   onClick={handleClaudeQualityCheck}
                   disabled={isClaudeProcessing || isFinalProofreading}
-                  className="px-4 py-2 bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 disabled:from-gray-300 disabled:to-gray-300 text-white rounded-lg transition-all flex items-center gap-2 font-semibold shadow-md"
+                  className="px-4 py-2 bg-gradient-to-r from-slate-500 to-slate-600 hover:from-slate-600 hover:to-slate-700 disabled:from-gray-300 disabled:to-gray-300 text-white rounded-lg transition-all flex items-center gap-2 font-semibold shadow-md"
                   title="Claude品質チェック：ハルシネーション除去・AI文体リライト（テスト用）"
                 >
                   {isClaudeProcessing ? (
@@ -2651,6 +2706,21 @@ ${
                     onChange={handleImportChecked}
                   />
                 </label>
+                <button
+                  onClick={handleMarketingCheck}
+                  disabled={isMarketingChecking || isFinalProofreading || isClaudeProcessing}
+                  className="px-4 py-2 bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 disabled:from-gray-300 disabled:to-gray-300 text-white rounded-lg transition-all flex items-center gap-2 font-semibold shadow-sm"
+                  title="CTA・まとめのコピーライティング品質を5軸で診断・改善"
+                >
+                  {isMarketingChecking ? (
+                    <>
+                      <span className="animate-pulse">📣</span>
+                      チェック中...
+                    </>
+                  ) : (
+                    <>📣 CTAチェック</>
+                  )}
+                </button>
               </div>
             </div>
           )}
@@ -2661,7 +2731,7 @@ ${
           {isGenerating ? (
             <div className="flex-1 flex items-center justify-center">
               <div className="text-center">
-                <LoadingSpinner />
+                <LoadingSpinner message="AIが記事を執筆中です..." subMessage="セクション単位で生成しています。しばらくお待ちください。" />
                 <p className="mt-4 text-gray-600">
                   {generationProgress || "セクション単位で記事を生成中..."}
                 </p>
@@ -2780,6 +2850,30 @@ ${
                   </div>
                 </div>
               </div>
+
+              {/* マーケティングチェック結果 */}
+              {(marketingCheckResult || marketingCheckError || isMarketingChecking) && (
+                <div className="w-full border-t border-gray-200 px-6 pb-6">
+                  {isMarketingChecking && (
+                    <div className="mt-4 p-4 bg-orange-50 border border-orange-200 rounded-lg flex items-center gap-3">
+                      <div className="animate-spin h-5 w-5 border-2 border-orange-500 border-t-transparent rounded-full"></div>
+                      <p className="text-sm text-orange-700">CTA・まとめのマーケティングチェック中...</p>
+                    </div>
+                  )}
+                  {marketingCheckError && (
+                    <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+                      ❌ {marketingCheckError}
+                    </div>
+                  )}
+                  {marketingCheckResult && (
+                    <MarketingCheckResultComponent
+                      result={marketingCheckResult}
+                      onApply={handleApplyMarketingImprovement}
+                      onClose={function() { setMarketingCheckResult(null); }}
+                    />
+                  )}
+                </div>
+              )}
 
               {/* マルチエージェント校閲結果パネル */}
               {multiAgentResult && (

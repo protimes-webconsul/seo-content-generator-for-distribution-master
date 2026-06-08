@@ -560,6 +560,100 @@ const App: React.FC = () => {
     []
   );
 
+  // Ver.2の構成案生成（競合調査なし）
+  const handleGenerateV2WithoutResearch = useCallback(
+    async (newKeyword: string, includeImages: boolean) => {
+      if (!newKeyword.trim()) {
+        setError("キーワードを入力してください。");
+        return;
+      }
+
+      setIsLoading(true);
+      setError(null);
+      setOutline(null);
+      setOutlineV2(null);
+      setCompetitorResearch(null);
+      setSources(undefined);
+      setKeyword(newKeyword);
+      setIsV2Mode(true);
+      setApiUsageWarning(null);
+      setSavedArticleId(null);
+      setIsOutlineSaved(false);
+      setIsArticleSaved(false);
+
+      try {
+        // 空の競合調査結果を作成（競合調査をスキップ）
+        const emptyResearchResult: CompetitorResearchResult = {
+          keyword: newKeyword,
+          analyzedAt: new Date().toISOString(),
+          totalArticlesScanned: 0,
+          validArticles: [],
+          excludedCount: 0,
+          commonTopics: [],
+          recommendedWordCount: { min: 3000, max: 8000, optimal: 5000 },
+          frequencyWords: []
+        };
+
+        // 参考資料のAI分析
+        let refContext = "";
+        if (selectedRefMaterialIds.length > 0) {
+          try {
+            console.log("🔬 参考資料をAI分析中（E-E-A-T強化）...");
+            refContext = await analyzeForArticle(selectedRefMaterialIds, newKeyword);
+            setRefMaterialContext(refContext);
+            console.log("✅ 参考資料AI分析完了:", refContext.length, "文字");
+          } catch (err) {
+            console.error("⚠️ 参考資料AI分析失敗:", err);
+          }
+        }
+
+        // 構成案を生成（競合データなし）
+        console.log("Generating SEO outline without competitor research... mode=" + outlineMode);
+        const v2Outline = outlineMode === 'siteData'
+          ? await generateOutlineSiteDataMode(
+              newKeyword,
+              emptyResearchResult,
+              includeImages,
+              true,
+              refContext || undefined,
+              clientProfile || undefined
+            )
+          : await generateOutlineV2(
+              newKeyword,
+              emptyResearchResult,
+              includeImages,
+              true,
+              refContext || undefined,
+              clientProfile || undefined
+            );
+
+        // 構成チェックと自動修正
+        const { finalOutline, checkResult, wasFixed } =
+          await checkAndFixOutline(v2Outline, newKeyword, emptyResearchResult);
+
+        if (wasFixed) {
+          console.log("構成案が自動修正されました");
+        }
+        if (!checkResult.isValid) {
+          console.warn("構成案にまだエラーが残っています:", checkResult.errors);
+        }
+
+        setOutlineV2(finalOutline);
+        setActiveTab("outline");
+      } catch (err) {
+        console.error(err);
+        setError(
+          err instanceof Error
+            ? err.message
+            : "生成中にエラーが発生しました。しばらくしてからもう一度お試しください。"
+        );
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    []
+  );
+
   // ────────────────────────────────────────────────
   // キーワード管理: SheetからOutlineを読み込んで構成案タブに反映
   // ────────────────────────────────────────────────
@@ -607,7 +701,7 @@ const App: React.FC = () => {
   const handleBatchProcessItem = async (item: BatchQueueItem): Promise<{ title: string; fileName: string }> => {
     console.log('🌙 バッチ処理開始:', item.keyword);
 
-    // 取引先プロフィールを名前でマッチング
+    // ① 取引先プロフィールを名前でマッチング
     let batchClientProfile = null;
     if (item.clientName) {
       const matched = clientSummaries.find(function(c) {
@@ -624,15 +718,46 @@ const App: React.FC = () => {
       }
     }
 
-    // 競合分析
-    const { generateCompetitorResearch: gcr } = await import('./services/competitorResearchWithWebFetch');
-    const research = await gcr(item.keyword, function() {}, true);
+    // ② 競合調査なし（空データで進む）
+    console.log('⏭️ バッチ: 競合調査スキップ（サイトデータ型モード）');
+    const emptyResearch: CompetitorResearchResult = {
+      keyword: item.keyword,
+      analyzedAt: new Date().toISOString(),
+      totalArticlesScanned: 0,
+      validArticles: [],
+      excludedCount: 0,
+      commonTopics: [],
+      recommendedWordCount: { min: 3000, max: 8000, optimal: 5000 },
+      frequencyWords: []
+    };
 
-    // 構成案生成
-    const { generateOutlineV2: gov2 } = await import('./services/outlineGeneratorV2');
+    // ③ 構成案生成（サイトデータ型）
+    console.log('📝 バッチ: 構成案生成中...');
+    const rawOutline = await generateOutlineSiteDataMode(
+      item.keyword,
+      emptyResearch,
+      false,
+      true,
+      undefined,
+      batchClientProfile || undefined
+    );
+
+    // ④ 構成案フォーマットチェック（既存）
+    console.log('🔍 バッチ: 構成案フォーマットチェック中...');
     const { checkAndFixOutline: cafo } = await import('./services/outlineCheckerV2');
-    const rawOutline = await gov2(item.keyword, research, false, false, undefined, batchClientProfile || undefined);
-    const { finalOutline } = await cafo(rawOutline, item.keyword, research);
+    const { finalOutline: formatCheckedOutline } = await cafo(rawOutline, item.keyword, emptyResearch);
+
+    // ⑤ 構成案品質チェック・改善（10項目審査）→ 改善版を自動採用
+    console.log('🔎 バッチ: 構成案品質チェック・改善中...');
+    let finalOutline = formatCheckedOutline;
+    try {
+      const { reviewAndReviseOutline } = await import('./services/outlineReviewService');
+      const reviewResult = await reviewAndReviseOutline(formatCheckedOutline, item.keyword);
+      finalOutline = reviewResult.revisedOutline;
+      console.log('✅ バッチ: 構成案改善版を採用');
+    } catch (reviewErr) {
+      console.warn('⚠️ バッチ: 構成案品質チェック失敗（フォーマットチェック済み版で続行）', reviewErr);
+    }
 
     // 構成案を保存
     const { saveOutline: so, updateSavedArticle: usa } = await import('./services/articleStorageService');
@@ -643,7 +768,8 @@ const App: React.FC = () => {
       outline: finalOutline,
     });
 
-    // 記事執筆
+    // ⑥ 記事執筆
+    console.log('✍️ バッチ: 記事執筆中...');
     const outlineMarkdown = convertOutlineV2ToMarkdown(finalOutline, item.keyword);
     const articleHtml = await generateArticleV3({
       outline: outlineMarkdown,
@@ -655,16 +781,35 @@ const App: React.FC = () => {
       writingStyleSample: buildCombinedStyleText(writingStyleSample),
     });
 
-    // 記事を保存
+    // ⑦ CTAマーケティングチェック → 改善コピーを自動反映
+    console.log('📣 バッチ: CTAマーケティングチェック中...');
+    let finalHtml = articleHtml;
+    try {
+      const { runMarketingCheck, extractConclusionAndCta } = await import('./services/marketingCheckService');
+      const marketingResult = await runMarketingCheck(
+        articleHtml,
+        item.keyword,
+        batchClientProfile || null,
+        finalOutline.targetAudience || ''
+      );
+      if (marketingResult.improvedHtml && marketingResult.improvedHtml.trim()) {
+        const originalCta = extractConclusionAndCta(articleHtml);
+        finalHtml = articleHtml.replace(originalCta, marketingResult.improvedHtml);
+        console.log('✅ バッチ: CTAマーケティング改善版を反映');
+      }
+    } catch (marketingErr) {
+      console.warn('⚠️ バッチ: CTAチェック失敗（元の記事で続行）', marketingErr);
+    }
+
+    // ⑧ 保存
     const articleData = {
       title: finalOutline.title || item.keyword,
       metaDescription: finalOutline.metaDescription || '',
-      htmlContent: articleHtml,
-      plainText: articleHtml.replace(/<[^>]*>/g, ''),
+      htmlContent: finalHtml,
+      plainText: finalHtml.replace(/<[^>]*>/g, ''),
     };
     await usa(savedId, { article: articleData });
 
-    // savedId（UUID）をそのまま返す → BatchMode の fetchSavedArticleById で使用
     console.log('✅ バッチ処理完了:', item.keyword, '→ id:', savedId);
     return { title: articleData.title, fileName: savedId };
   };
@@ -732,6 +877,7 @@ const App: React.FC = () => {
           <KeywordInputForm
             onGenerate={handleGenerate}
             onGenerateV2={handleGenerateV2}
+            onGenerateV2WithoutResearch={handleGenerateV2WithoutResearch}
             isLoading={isLoading}
             apiUsageToday={getApiUsageToday()}
             apiUsageWarning={apiUsageWarning}
@@ -1059,6 +1205,10 @@ const App: React.FC = () => {
                     }}
                     onSave={handleSaveOutline}
                     isSaved={isOutlineSaved}
+                    onOutlineUpdate={function(newOutline) {
+                      setOutlineV2(newOutline);
+                      setIsOutlineSaved(false);
+                    }}
                   />
                 )}
 
@@ -1115,6 +1265,8 @@ const App: React.FC = () => {
                 isSaved={isArticleSaved}
                 onExportForCheck={handleExportForCheck}
                 onImportChecked={handleImportChecked}
+                clientProfile={clientProfile || null}
+                targetAudience={outlineV2 ? outlineV2.targetAudience : undefined}
               />
             )}
 

@@ -2,6 +2,9 @@ import React, { useState, useMemo, useRef } from "react";
 import type { SeoOutline } from "../types";
 import { generateFaqSchemaFromArticle } from "../utils/faqSchemaGenerator";
 import { reviseArticle } from "../services/articleRevisionService";
+import { runMarketingCheck, extractConclusionAndCta } from "../services/marketingCheckService";
+import type { MarketingCheckResult } from "../services/marketingCheckService";
+import MarketingCheckResultComponent from "./MarketingCheckResult";
 
 interface ArticleDisplayProps {
   article: {
@@ -24,6 +27,8 @@ interface ArticleDisplayProps {
   isSaved?: boolean;
   onExportForCheck?: () => void;
   onImportChecked?: (file: File) => void;
+  clientProfile?: import('../types').ClientProfile | null;
+  targetAudience?: string;
 }
 
 // ────────────────────────────────────────────────
@@ -79,12 +84,49 @@ const ArticleDisplay: React.FC<ArticleDisplayProps> = ({
   isSaved,
   onExportForCheck,
   onImportChecked,
+  clientProfile,
+  targetAudience,
 }) => {
   const importInputRef = useRef<HTMLInputElement>(null);
   const [viewMode, setViewMode] = useState<"preview" | "code">("preview");
   const [copyButtonText, setCopyButtonText] = useState("HTMLコピー");
   const [isSavingArticle, setIsSavingArticle] = useState(false);
   const [articleSaveMessage, setArticleSaveMessage] = useState('');
+
+  // マーケティングチェック
+  const [isMarketingChecking, setIsMarketingChecking] = useState(false);
+  const [marketingCheckResult, setMarketingCheckResult] = useState<MarketingCheckResult | null>(null);
+  const [marketingCheckError, setMarketingCheckError] = useState<string | null>(null);
+
+  const handleMarketingCheck = async () => {
+    setIsMarketingChecking(true);
+    setMarketingCheckResult(null);
+    setMarketingCheckError(null);
+    try {
+      const result = await runMarketingCheck(
+        article.htmlContent,
+        keyword,
+        clientProfile || null,
+        targetAudience || ''
+      );
+      setMarketingCheckResult(result);
+    } catch (err) {
+      setMarketingCheckError(
+        'マーケティングチェックエラー: ' + (err instanceof Error ? err.message : String(err))
+      );
+    } finally {
+      setIsMarketingChecking(false);
+    }
+  };
+
+  const handleApplyMarketingImprovement = (improvedHtml: string) => {
+    const originalCta = extractConclusionAndCta(article.htmlContent);
+    const newHtml = article.htmlContent.replace(originalCta, improvedHtml);
+    if (onArticleUpdate) {
+      onArticleUpdate(newHtml);
+    }
+    setMarketingCheckResult(null);
+  };
 
   const handleSaveArticle = async () => {
     if (!onSave) return;
@@ -353,8 +395,39 @@ ${article.plainText}`;
               {isSavingArticle ? '保存中...' : (isSaved || articleSaveMessage === 'saved') ? '✅ 保存済み' : '💾 保存'}
             </button>
           )}
+          <button
+            onClick={handleMarketingCheck}
+            disabled={isMarketingChecking}
+            className="px-4 py-2 bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 disabled:from-gray-300 disabled:to-gray-300 text-white rounded-lg transition-all flex items-center gap-2 font-semibold shadow-sm text-sm"
+            title="CTA・まとめのコピーライティング品質を5軸で診断・改善"
+          >
+            {isMarketingChecking ? (
+              <>
+                <span className="animate-pulse">📣</span>
+                チェック中...
+              </>
+            ) : (
+              <>📣 CTAチェック</>
+            )}
+          </button>
         </div>
       </div>
+
+      {/* マーケティングチェックエラー */}
+      {marketingCheckError && (
+        <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+          ❌ {marketingCheckError}
+        </div>
+      )}
+
+      {/* マーケティングチェック結果 */}
+      {marketingCheckResult && (
+        <MarketingCheckResultComponent
+          result={marketingCheckResult}
+          onApply={handleApplyMarketingImprovement}
+          onClose={function() { setMarketingCheckResult(null); }}
+        />
+      )}
 
       {/* 記事情報 */}
       <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm">

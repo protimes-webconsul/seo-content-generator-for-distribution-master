@@ -4,6 +4,7 @@ import { SearchIcon } from "./icons";
 interface KeywordInputFormProps {
   onGenerate: (keyword: string, includeImages: boolean) => void;
   onGenerateV2?: (keyword: string, includeImages: boolean) => void;
+  onGenerateV2WithoutResearch?: (keyword: string, includeImages: boolean) => void;
   isLoading: boolean;
   apiUsageToday?: number;
   apiUsageWarning?: string | null;
@@ -18,6 +19,7 @@ interface KeywordInputFormProps {
 const KeywordInputForm: React.FC<KeywordInputFormProps> = ({
   onGenerate,
   onGenerateV2,
+  onGenerateV2WithoutResearch,
   isLoading,
   apiUsageToday = 0,
   apiUsageWarning,
@@ -25,6 +27,7 @@ const KeywordInputForm: React.FC<KeywordInputFormProps> = ({
 }) => {
   const [keyword, setKeyword] = useState("");
   const [includeImages, setIncludeImages] = useState(true);
+  const [activeButton, setActiveButton] = useState<'with' | 'without' | null>(null);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -34,9 +37,25 @@ const KeywordInputForm: React.FC<KeywordInputFormProps> = ({
   const handleSubmitV2 = (e: React.FormEvent) => {
     e.preventDefault();
     if (onGenerateV2) {
+      setActiveButton('with');
       onGenerateV2(keyword, includeImages);
     }
   };
+
+  const handleSubmitV2WithoutResearch = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (onGenerateV2WithoutResearch) {
+      setActiveButton('without');
+      onGenerateV2WithoutResearch(keyword, includeImages);
+    }
+  };
+
+  // ロード完了時にactiveButtonをリセット
+  React.useEffect(function() {
+    if (!isLoading) {
+      setActiveButton(null);
+    }
+  }, [isLoading]);
 
   return (
     <div className="space-y-4">
@@ -69,39 +88,45 @@ const KeywordInputForm: React.FC<KeywordInputFormProps> = ({
           </div>
         </div>
         {onGenerateV2 && (
-          <button
-            type="submit"
-            disabled={isLoading}
-            className="w-full sm:w-auto flex items-center justify-center px-6 py-3.5 font-bold rounded-xl focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-white transition-all duration-200 ease-in-out disabled:bg-gray-300 disabled:cursor-not-allowed transform hover:scale-105 disabled:scale-100 shadow-md whitespace-nowrap bg-gradient-to-r from-blue-500 to-blue-600 text-white hover:from-blue-600 hover:to-blue-700 focus:ring-blue-500"
-          >
-            {isLoading ? (
-              <>
-                <svg
-                  className="animate-spin -ml-1 mr-3 h-5 w-5 text-white"
-                  xmlns="http://www.w3.org/2000/svg"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                >
-                  <circle
-                    className="opacity-25"
-                    cx="12"
-                    cy="12"
-                    r="10"
-                    stroke="currentColor"
-                    strokeWidth="4"
-                  ></circle>
-                  <path
-                    className="opacity-75"
-                    fill="currentColor"
-                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                  ></path>
-                </svg>
-                分析中...
-              </>
-            ) : (
-              <>構成</>
+          <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+            <button
+              type="submit"
+              disabled={isLoading}
+              className="flex items-center justify-center px-4 py-3.5 font-bold rounded-xl focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-white transition-all duration-200 ease-in-out disabled:cursor-not-allowed transform hover:scale-105 disabled:scale-100 shadow-md whitespace-nowrap text-sm bg-gradient-to-r from-blue-500 to-blue-600 text-white hover:from-blue-600 hover:to-blue-700 focus:ring-blue-500 disabled:from-blue-300 disabled:to-blue-300"
+            >
+              {isLoading && activeButton === 'with' ? (
+                <>
+                  <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  分析中...
+                </>
+              ) : (
+                <>🔍 競合調査あり</>
+              )}
+            </button>
+            {onGenerateV2WithoutResearch && (
+              <button
+                type="button"
+                onClick={handleSubmitV2WithoutResearch}
+                disabled={isLoading}
+                className="flex items-center justify-center px-4 py-3.5 font-bold rounded-xl focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-white transition-all duration-200 ease-in-out disabled:cursor-not-allowed transform hover:scale-105 disabled:scale-100 shadow-md whitespace-nowrap text-sm bg-gradient-to-r from-emerald-500 to-emerald-600 text-white hover:from-emerald-600 hover:to-emerald-700 focus:ring-emerald-500 disabled:from-emerald-300 disabled:to-emerald-300"
+              >
+                {isLoading && activeButton === 'without' ? (
+                  <>
+                    <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    生成中...
+                  </>
+                ) : (
+                  <>📝 競合調査なし</>
+                )}
+              </button>
             )}
-          </button>
+          </div>
         )}
       </form>
 

@@ -27,6 +27,8 @@ dist-ssr
 # Credentials / tokens (never distribute)
 *.pickle
 server/config/wp-credentials.json
+server/config/review-service-account.json
+server/google-credentials.json
 
 # Editor directories and files
 .vscode/*

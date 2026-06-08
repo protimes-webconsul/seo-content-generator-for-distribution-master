@@ -12,6 +12,9 @@ import {
   CharacterCountIcon,
   ClipboardIcon
 } from './icons';
+import { reviewAndReviseOutline } from '../services/outlineReviewService';
+import type { OutlineReviewResult } from '../services/outlineReviewService';
+import OutlineReviewResultComponent from './OutlineReviewResult';
 
 interface OutlineDisplayV2Props {
   outline: SeoOutlineV2;
@@ -22,6 +25,7 @@ interface OutlineDisplayV2Props {
   onRevise?: (instruction: string) => Promise<void>; // AI修正
   onSave?: () => Promise<void>; // 構成案を保存
   isSaved?: boolean; // 保存済みかどうか
+  onOutlineUpdate?: (newOutline: SeoOutlineV2) => void; // 改善案採用時の更新
 }
 
 const Card: React.FC<{ icon: React.ReactNode; title: string; children: React.ReactNode }> = ({ icon, title, children }) => (
@@ -38,10 +42,36 @@ const Card: React.FC<{ icon: React.ReactNode; title: string; children: React.Rea
   </div>
 );
 
-const OutlineDisplayV2: React.FC<OutlineDisplayV2Props> = ({ outline, keyword, outlineMode, onStartWriting, onStartWritingV3, onRevise, onSave, isSaved }) => {
+const OutlineDisplayV2: React.FC<OutlineDisplayV2Props> = ({ outline, keyword, outlineMode, onStartWriting, onStartWritingV3, onRevise, onSave, isSaved, onOutlineUpdate }) => {
   const [copyButtonText, setCopyButtonText] = useState('Markdownコピー');
   const [isSaving, setIsSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState('');
+
+  // 構成案チェック・改善
+  const [isReviewing, setIsReviewing] = useState(false);
+  const [reviewResult, setReviewResult] = useState<OutlineReviewResult | null>(null);
+  const [reviewError, setReviewError] = useState('');
+
+  const handleReview = async () => {
+    setIsReviewing(true);
+    setReviewResult(null);
+    setReviewError('');
+    try {
+      const result = await reviewAndReviseOutline(outline, keyword);
+      setReviewResult(result);
+    } catch (err) {
+      setReviewError(err instanceof Error ? err.message : 'チェックに失敗しました');
+    } finally {
+      setIsReviewing(false);
+    }
+  };
+
+  const handleAdoptRevised = (revisedOutline: SeoOutlineV2) => {
+    if (onOutlineUpdate) {
+      onOutlineUpdate(revisedOutline);
+    }
+    setReviewResult(null);
+  };
 
   const handleSave = async () => {
     if (!onSave) return;
@@ -293,8 +323,42 @@ ${outline.competitorComparison.differentiators.map((diff, i) => `  ${i + 1}) ${d
               {isSaving ? '保存中...' : (isSaved || saveMessage === 'saved') ? '✅ 保存済み' : '💾 保存'}
             </button>
           )}
+          <button
+            onClick={handleReview}
+            disabled={isReviewing}
+            className="flex items-center gap-2 px-4 py-2 font-semibold rounded-xl text-sm transition-all duration-200 border bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700 disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            {isReviewing ? (
+              <>
+                <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                チェック中...
+              </>
+            ) : (
+              <>🔍 構成案をチェック・改善</>
+            )}
+          </button>
         </div>
       </div>
+
+      {/* チェックエラー表示 */}
+      {reviewError && (
+        <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+          ❌ {reviewError}
+        </div>
+      )}
+
+      {/* チェック結果・改善案表示 */}
+      {reviewResult && (
+        <OutlineReviewResultComponent
+          result={reviewResult}
+          originalOutline={outline}
+          onAdopt={handleAdoptRevised}
+          onClose={function() { setReviewResult(null); }}
+        />
+      )}
 
       {/* チェックリストステータス */}
       <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
