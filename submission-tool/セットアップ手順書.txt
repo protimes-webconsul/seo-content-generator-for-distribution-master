@@ -43,6 +43,7 @@ seo-content-generator-for-distribution-master/
 └── server/
     ├── scraping-server.js      ← バックエンド本体
     ├── package.json
+    ├── google-credentials.json ← パソ課から受け取るファイル③（Sheets認証）
     └── config/
         └── wp-credentials.json ← パソ課から受け取るファイル②
 
@@ -103,6 +104,10 @@ seo-content-generator-for-distribution-master/
 
   ■ファイル②：wp-credentials.json
     配置先：seo-content-generator-for-distribution-master\server\config\ の中
+
+  ■ファイル③：google-credentials.json
+    配置先：seo-content-generator-for-distribution-master\server\ の中
+    ※ Googleスプレッドシート（取引先一覧・WordPress設定）へのアクセスに必要
 
   ※ ファイルが見当たらない場合はパソ課（清水）に確認してください
 
